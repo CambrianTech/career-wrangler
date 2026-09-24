@@ -19,11 +19,36 @@ This repository is a **consumer** of:
 - **AIRC** for transport and coordination
 - **Continuum** for personas, commands, events, Playwright automation, and CAPTCHA handling
 
-`career-wrangler` therefore acts as a career-domain recipe layer. It decides **what** work should happen and packages that work into AIRC commands for a Continuum persona, rather than implementing low-level browser automation directly.
+`career-wrangler` is still a normal Rust project whose code is the source of truth. The shared engine, schemas, scoring, and outputs live here like any other application. The Continuum/AIRC recipe layer exists to coordinate persona-driven execution for this repo's agentic workflow; it is not treated as the generator or owner of the project code.
+
+That means two things can be true at once:
+
+- the repo is a standalone codebase built directly in Rust
+- the repo also emits Continuum/AIRC execution plans because this project depends on agent/persona workflows
+
+If this were a non-agentic project, the shared engine could still exist without any Continuum recipe phase plan.
 
 Public integration types derive `ts-rs::TS` so TypeScript definitions can be generated from the Rust source when downstream consumers need them.
 
 Generated TypeScript bindings are checked into `/home/runner/work/career-wrangler/career-wrangler/bindings`.
+
+## Fork-local source data
+
+User-specific inputs live under `/home/runner/work/career-wrangler/career-wrangler/user-sources/`.
+
+The checked-in `/home/runner/work/career-wrangler/career-wrangler/user-sources/template/` directory shows the intended fork pattern:
+
+- `fork-config.json`
+- `identity-profile.json`
+- `work-history.json`
+- `projects-and-github.json`
+- `skills-and-domain-tags.json`
+- `voice-examples.json`
+- `job-preferences.json`
+- `prior-applications.json`
+- `approval-policy.json`
+
+Forks should mostly replace those files rather than changing shared engine code.
 
 ### Core workflow
 

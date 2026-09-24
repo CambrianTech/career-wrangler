@@ -1,0 +1,10 @@
+[
+  {
+    "skill": "Rust",
+    "domains": ["Systems", "Automation"]
+  },
+  {
+    "skill": "Continuum",
+    "domains": ["Agents"]
+  }
+]
