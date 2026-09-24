@@ -1,6 +1,6 @@
 # career-wrangler
 
-`career-wrangler` is a minimal runnable prototype for an agentic career workflow that:
+`career-wrangler` is a Rust prototype for an agentic career workflow that:
 
 - builds a work portfolio from GitHub-style artifacts and other portfolio experience
 - tailors resume bullets and cover letters to a target position in the candidate's voice
@@ -10,7 +10,7 @@
 
 ## What is implemented
 
-The repository now contains a small Node-based reference implementation in `/home/runner/work/career-wrangler/career-wrangler/src/index.js`.
+The repository now contains a Rust library implementation in `/home/runner/work/career-wrangler/career-wrangler/src/lib.rs`.
 
 ## Architecture
 
@@ -20,6 +20,10 @@ This repository is a **consumer** of:
 - **Continuum** for personas, commands, events, Playwright automation, and CAPTCHA handling
 
 `career-wrangler` therefore acts as a career-domain recipe layer. It decides **what** work should happen and packages that work into AIRC commands for a Continuum persona, rather than implementing low-level browser automation directly.
+
+Public integration types derive `ts-rs::TS` so TypeScript definitions can be generated from the Rust source when downstream consumers need them.
+
+Generated TypeScript bindings are checked into `/home/runner/work/career-wrangler/career-wrangler/bindings`.
 
 ### Core workflow
 
@@ -38,5 +42,5 @@ This repository does **not** implement direct CAPTCHA bypassing or low-level bro
 Run the focused test suite with:
 
 ```bash
-npm test
+cargo test
 ```
