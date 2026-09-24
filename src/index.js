@@ -95,6 +95,92 @@ function tailorApplication({ portfolio, position, voiceProfile, variant = 'A' })
   };
 }
 
+function createAircCommand({
+  room,
+  persona,
+  command,
+  payload,
+  capabilities = [],
+  humanApprovalRequired = true,
+}) {
+  return {
+    transport: 'airc',
+    room,
+    persona,
+    command,
+    payload,
+    capabilities: Array.from(new Set(capabilities)),
+    humanApprovalRequired,
+  };
+}
+
+function createContinuumRecipe({
+  portfolio,
+  position,
+  voiceProfile,
+  persona,
+  room = '#general',
+  variant = 'A',
+}) {
+  const application = tailorApplication({
+    portfolio,
+    position,
+    voiceProfile,
+    variant,
+  });
+
+  const sharedPayload = {
+    variant,
+    position,
+    voiceProfile,
+    selectedArtifacts: application.selectedArtifacts,
+    resumeBullets: application.resumeBullets,
+    coverLetter: application.coverLetter,
+  };
+
+  const commands = [
+    createAircCommand({
+      room,
+      persona,
+      command: 'continuum.career.search-jobs',
+      payload: {
+        title: position.title,
+        company: position.company,
+        skills: position.skills ?? [],
+      },
+      capabilities: ['persona', 'job-search'],
+    }),
+    createAircCommand({
+      room,
+      persona,
+      command: 'continuum.career.generate-materials',
+      payload: sharedPayload,
+      capabilities: ['persona', 'resume-generation', 'cover-letter-generation'],
+    }),
+    createAircCommand({
+      room,
+      persona,
+      command: 'continuum.career.submit-application',
+      payload: {
+        ...sharedPayload,
+        automation: {
+          owner: 'continuum',
+          responsibilities: ['playwright', 'captcha', 'form-submission'],
+        },
+      },
+      capabilities: ['persona', 'playwright', 'captcha', 'form-submission'],
+    }),
+  ];
+
+  return {
+    persona,
+    room,
+    variant,
+    application,
+    commands,
+  };
+}
+
 class InMemoryApplicationRepository {
   constructor() {
     this.applications = [];
@@ -121,19 +207,16 @@ class InMemoryApplicationRepository {
 }
 
 function createSubmissionWorkflow({
-  application,
-  formFields = [],
-  requiresCaptcha = false,
+  recipe,
   approvalAssignee = 'candidate',
 }) {
   return {
-    application,
-    formFields,
-    requiresCaptcha,
+    recipe,
     approvalAssignee,
     status: 'awaiting-human-approval',
     history: [`awaiting approval from ${approvalAssignee}`],
-    submittedForm: null,
+    dispatch: null,
+    result: null,
   };
 }
 
@@ -150,43 +233,56 @@ function advanceSubmissionWorkflow(workflow, event) {
       };
     }
 
-    const nextStatus = workflow.requiresCaptcha ? 'awaiting-human-captcha' : 'ready-to-submit';
-
     return {
       ...workflow,
-      status: nextStatus,
+      status: 'ready-to-dispatch',
       history: [...workflow.history, `approved by ${event.actor}`],
     };
   }
 
-  if (workflow.status === 'awaiting-human-captcha') {
-    if (event.type !== 'captcha-solved' || !event.actor) {
+  if (workflow.status === 'ready-to-dispatch') {
+    if (event.type !== 'dispatch' || !event.dispatchId) {
       return {
         ...workflow,
-        history: [...workflow.history, 'captcha still pending human action'],
+        history: [...workflow.history, 'dispatch still pending'],
       };
     }
 
     return {
       ...workflow,
-      status: 'ready-to-submit',
-      history: [...workflow.history, `captcha solved by ${event.actor}`],
+      status: 'awaiting-continuum-result',
+      dispatch: {
+        id: event.dispatchId,
+        persona: event.persona ?? workflow.recipe.persona,
+        room: event.room ?? workflow.recipe.room,
+      },
+      history: [
+        ...workflow.history,
+        `dispatched to ${event.persona ?? workflow.recipe.persona} in ${event.room ?? workflow.recipe.room}`,
+      ],
     };
   }
 
-  if (workflow.status === 'ready-to-submit') {
-    if (event.type !== 'submit' || !event.formValues) {
+  if (workflow.status === 'awaiting-continuum-result') {
+    if (event.type !== 'continuum-result' || !event.result) {
       return {
         ...workflow,
-        history: [...workflow.history, 'submission payload missing'],
+        history: [...workflow.history, 'awaiting continuum result'],
       };
     }
 
+    const nextStatus = event.result.status === 'submitted' ? 'submitted' : 'awaiting-human-approval';
+
     return {
       ...workflow,
-      status: 'submitted',
-      submittedForm: event.formValues,
-      history: [...workflow.history, 'application submitted'],
+      status: nextStatus,
+      result: event.result,
+      history: [
+        ...workflow.history,
+        nextStatus === 'submitted'
+          ? 'continuum reported application submitted'
+          : 'continuum requested additional human input',
+      ],
     };
   }
 
@@ -239,6 +335,8 @@ module.exports = {
   InMemoryApplicationRepository,
   advanceSubmissionWorkflow,
   buildWorkPortfolio,
+  createAircCommand,
+  createContinuumRecipe,
   createSubmissionWorkflow,
   tailorApplication,
 };
