@@ -156,7 +156,7 @@ pub struct ForkConfig {
     pub output_template: String,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct PortfolioArtifact {
     pub id: String,
@@ -250,7 +250,7 @@ pub struct JobDossier {
     pub application_questions: Vec<ApplicationQuestion>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct RankedArtifact {
     pub artifact: PortfolioArtifact,
@@ -269,7 +269,7 @@ pub struct EvidencePack {
     pub artifact_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct RankedEvidenceSet {
     pub schema_version: String,
@@ -590,7 +590,10 @@ impl<'a> ApplicationAnalytics<'a> {
     }
 }
 
-pub fn normalize_user_sources(config: &ForkConfig, sources: &UserSourceBundle) -> NormalizedPortfolio {
+pub fn normalize_user_sources(
+    config: &ForkConfig,
+    sources: &UserSourceBundle,
+) -> NormalizedPortfolio {
     let mut artifacts = Vec::<PortfolioArtifact>::new();
 
     for item in &sources.work_history {
@@ -702,9 +705,17 @@ pub fn build_work_portfolio(artifacts: Vec<PortfolioArtifact>) -> WorkPortfolio 
         }
     }
 
-    strengths.sort_by(|left, right| right.count.cmp(&left.count).then_with(|| left.skill.cmp(&right.skill)));
+    strengths.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.skill.cmp(&right.skill))
+    });
 
-    WorkPortfolio { artifacts, strengths }
+    WorkPortfolio {
+        artifacts,
+        strengths,
+    }
 }
 
 pub fn build_variant_id(config: &ForkConfig, dossier: &JobDossier, track: &str) -> String {
@@ -783,8 +794,10 @@ pub fn build_ranked_evidence(
                 if !existing.artifact_ids.contains(&artifact.artifact.id) {
                     existing.artifact_ids.push(artifact.artifact.id.clone());
                 }
-                existing.supporting_skills = merge_unique(&existing.supporting_skills, &artifact.matched_skills);
-                existing.supporting_domains = merge_unique(&existing.supporting_domains, &artifact.matched_domains);
+                existing.supporting_skills =
+                    merge_unique(&existing.supporting_skills, &artifact.matched_skills);
+                existing.supporting_domains =
+                    merge_unique(&existing.supporting_domains, &artifact.matched_domains);
             }
             None => evidence_packs.push(EvidencePack {
                 key: key.clone(),
@@ -818,11 +831,7 @@ pub fn generate_application_package(
         .preferred_phrase
         .clone()
         .unwrap_or_else(|| "I focus on practical results".to_owned());
-    let top_artifacts = evidence
-        .ranked_artifacts
-        .iter()
-        .take(4)
-        .collect::<Vec<_>>();
+    let top_artifacts = evidence.ranked_artifacts.iter().take(4).collect::<Vec<_>>();
 
     let bullets = top_artifacts
         .iter()
@@ -938,8 +947,10 @@ pub fn create_continuum_recipe(
                 responsibilities: responsibilities.clone(),
             },
             capabilities: phase_capabilities(phase),
-            human_approval_required: matches!(phase, ContinuumPhase::RequestApproval | ContinuumPhase::Submit)
-                && approval_policy.require_human_approval,
+            human_approval_required: matches!(
+                phase,
+                ContinuumPhase::RequestApproval | ContinuumPhase::Submit
+            ) && approval_policy.require_human_approval,
         })
         .collect::<Vec<_>>();
 
@@ -994,7 +1005,10 @@ pub fn capture_outcome(
     updated.status = status;
     updated.feedback = feedback;
     updated.rejection_reason = rejection_reason;
-    if matches!(status, SubmissionStatus::Submitted | SubmissionStatus::Callback | SubmissionStatus::Interview) {
+    if matches!(
+        status,
+        SubmissionStatus::Submitted | SubmissionStatus::Callback | SubmissionStatus::Interview
+    ) {
         updated.approvals = updated
             .approvals
             .into_iter()
@@ -1016,8 +1030,10 @@ pub fn run_pipeline(
     let normalized = normalize_user_sources(config, sources);
     let variant_id = build_variant_id(config, dossier, track);
     let ranked_evidence = build_ranked_evidence(&normalized, dossier, config, variant_id.clone());
-    let package = generate_application_package(&normalized, dossier, &ranked_evidence, variant_id.clone());
-    let continuum_recipe = create_continuum_recipe(config, dossier, &package, &normalized.approval_policy);
+    let package =
+        generate_application_package(&normalized, dossier, &ranked_evidence, variant_id.clone());
+    let continuum_recipe =
+        create_continuum_recipe(config, dossier, &package, &normalized.approval_policy);
     let submission_record = create_submission_record(&package, &normalized.approval_policy);
 
     PipelineOutputs {
@@ -1025,7 +1041,8 @@ pub fn run_pipeline(
         stages: vec![
             PipelineStage {
                 stage: PipelineStageKind::SourceIngestion,
-                description: "Normalize fork-provided source data into shared Rust types.".to_owned(),
+                description: "Normalize fork-provided source data into shared Rust types."
+                    .to_owned(),
             },
             PipelineStage {
                 stage: PipelineStageKind::EvidenceShaping,
@@ -1033,11 +1050,13 @@ pub fn run_pipeline(
             },
             PipelineStage {
                 stage: PipelineStageKind::ApplicationGeneration,
-                description: "Generate versioned materials and Continuum/AIRC phase commands.".to_owned(),
+                description: "Generate versioned materials and Continuum/AIRC phase commands."
+                    .to_owned(),
             },
             PipelineStage {
                 stage: PipelineStageKind::OutcomeCapture,
-                description: "Prepare submission and analytics records for later feedback capture.".to_owned(),
+                description: "Prepare submission and analytics records for later feedback capture."
+                    .to_owned(),
             },
         ],
         execution_boundary: ExecutionBoundary {
@@ -1046,8 +1065,10 @@ pub fn run_pipeline(
             continuum_recipe_required: true,
             notes: vec![
                 "The Rust project code is the authoritative implementation.".to_owned(),
-                "The Continuum/AIRC recipe coordinates persona-driven execution for this repo.".to_owned(),
-                "A non-agentic project could reuse the same engine without Continuum phases.".to_owned(),
+                "The Continuum/AIRC recipe coordinates persona-driven execution for this repo."
+                    .to_owned(),
+                "A non-agentic project could reuse the same engine without Continuum phases."
+                    .to_owned(),
             ],
         },
         normalized_portfolio: normalized,
@@ -1222,7 +1243,11 @@ mod tests {
             title: "Staff AI Engineer".to_owned(),
             role_family: "ai-platform".to_owned(),
             hiring_team: Some("Example hiring team".to_owned()),
-            skills: vec!["Rust".to_owned(), "Continuum".to_owned(), "Analytics".to_owned()],
+            skills: vec![
+                "Rust".to_owned(),
+                "Continuum".to_owned(),
+                "Analytics".to_owned(),
+            ],
             domain_tags: vec!["AI".to_owned(), "Automation".to_owned()],
             responsibilities: vec!["ship agents".to_owned(), "improve callbacks".to_owned()],
             application_questions: vec![ApplicationQuestion {
@@ -1238,13 +1263,18 @@ mod tests {
         assert_eq!(normalized.schema_version, SCHEMA_VERSION);
         assert_eq!(normalized.user_id, "joel");
         assert_eq!(normalized.portfolio.artifacts.len(), 4);
-        assert_eq!(normalized.approval_policy.checkpoints, vec!["materials", "submission"]);
-        assert!(normalized
-            .voice_profile
-            .preferred_phrase
-            .as_deref()
-            .unwrap()
-            .contains("I build systems that keep learning after launch"));
+        assert_eq!(
+            normalized.approval_policy.checkpoints,
+            vec!["materials", "submission"]
+        );
+        assert!(
+            normalized
+                .voice_profile
+                .preferred_phrase
+                .as_deref()
+                .unwrap()
+                .contains("I build systems that keep learning after launch")
+        );
     }
 
     #[test]
@@ -1270,7 +1300,10 @@ mod tests {
         assert_eq!(outputs.stages.len(), 4);
         assert!(outputs.execution_boundary.project_is_source_of_truth);
         assert!(outputs.execution_boundary.continuum_recipe_required);
-        assert_eq!(outputs.application_package.variant_id, "joel-ai-platform-example-co-control");
+        assert_eq!(
+            outputs.application_package.variant_id,
+            "joel-ai-platform-example-co-control"
+        );
         assert_eq!(outputs.continuum_recipe.commands.len(), 7);
         assert_eq!(
             outputs.continuum_recipe.commands[0].phase,
@@ -1316,7 +1349,10 @@ mod tests {
         assert_eq!(submitted.status, SubmissionStatus::Interview);
         assert!(submitted.approvals.iter().all(|decision| decision.approved));
         assert_eq!(analytics.len(), 1);
-        assert_eq!(analytics[0].variant_id, "joel-ai-platform-example-co-control");
+        assert_eq!(
+            analytics[0].variant_id,
+            "joel-ai-platform-example-co-control"
+        );
         assert_eq!(analytics[0].callbacks, 1);
         assert_eq!(analytics[0].interviews, 1);
         assert_eq!(analytics[0].rejections, 1);
