@@ -1,0 +1,21 @@
+{
+  "projects": [
+    {
+      "title": "Career workflow engine",
+      "summary": "Describe your project and why it matters.",
+      "repository": "owner/repo",
+      "skills": ["Rust", "AIRC"],
+      "domain_tags": ["Automation", "Recruiting"]
+    }
+  ],
+  "github_evidence": [
+    {
+      "repository": "owner/continuum-integration",
+      "title": "Continuum orchestration",
+      "summary": "Describe relevant GitHub evidence.",
+      "skills": ["Continuum", "TypeScript"],
+      "domain_tags": ["AI", "Agents"],
+      "url": "https://github.com/owner/continuum-integration"
+    }
+  ]
+}

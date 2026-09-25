@@ -1,0 +1,5 @@
+{
+  "approvers": ["template-user"],
+  "checkpoints": ["materials", "submission"],
+  "require_human_approval": true
+}

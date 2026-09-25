@@ -1,0 +1,9 @@
+[
+  {
+    "company": "Example Company",
+    "role": "Staff Engineer",
+    "summary": "Describe shipped work and outcomes.",
+    "skills": ["Rust", "Analytics"],
+    "domain_tags": ["AI", "Automation"]
+  }
+]

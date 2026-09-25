@@ -1,0 +1,11 @@
+[
+  {
+    "company": "Previous Company",
+    "role": "Principal Engineer",
+    "role_family": "platform",
+    "variant_id": "template-platform-previous-company-control",
+    "status": "rejected",
+    "notes": "Capture lessons learned here.",
+    "rejection_reason": "Resume too generic"
+  }
+]
