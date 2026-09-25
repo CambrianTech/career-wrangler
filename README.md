@@ -69,3 +69,11 @@ Run the focused test suite with:
 ```bash
 cargo test
 ```
+
+## CI
+
+The basic CI workflow runs:
+
+- `cargo fmt --check`
+- `cargo test`
+- `git diff --exit-code` after tests to confirm generated bindings stay in sync
