@@ -36,7 +36,7 @@ Roles found by the scanning jobs.
 
 ### submissions
 The tracked unit end-to-end (README → Submission tracking).
-`id`, `owner_id`, `posting_id FK`, `status` = found | package_ready | waiting_on_human | submitted | responded | interview | offer | closed, `whose_turn` = persona | human, `approved_by user_id nullable`, `approved_at nullable`, `submitted_at nullable`, `evidence_ref → blobs nullable`.
+`id`, `owner_id`, `posting_id FK`, `status` = found | package_ready | waiting_on_human | submitted | responded | interview | offer | closed, `whose_turn` = persona | human, `approved_by user_id nullable`, `approved_at nullable`, `submitted_at nullable`, `evidence_ref → blobs nullable`. The pair `(id, owner_id)` carries a unique index: it is the referenced target of the composite foreign keys children use to ride ownership down from here.
 
 ### packages
 The exact thing sent — never reconstructed from memory. One row per attempt; a retry is a new row.
