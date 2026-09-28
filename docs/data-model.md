@@ -1,0 +1,102 @@
+# Data model
+
+The database of career-wrangler — the source of truth (README → Resilience). Everything the website shows is a projection of these rows; nothing lives only in memory or a browser tab. Conventions first, then the tables, then the invariants that make failure readable instead of silent.
+
+## Conventions
+
+- Every table has `id uuid PK` and `created_at timestamptz`.
+- Personal rows are scoped by `owner_id`: every row carrying one user's data names whose it is, and no read path crosses owners without a role grant (README → Privacy).
+- Large content (resumes, cover letters, form answers, evidence) is stored by reference: `*_ref` points at a content-addressed blob store (`blobs(sha256 PK, bytes)`), so "the exact package sent" stays reproducible byte-for-byte.
+
+## Tables
+
+### users
+Accounts for both layers — humans and citizens log in like users (README → Personas are an independent layer).
+`id`, `name`, `email` unique, `kind` = human | citizen, `peer_id` nullable (the Continuum peer id when kind = citizen).
+
+### user_roles
+Which pipeline a user may act in, and how. One row per (user, owner) pair:
+`user_id`, `owner_id` (the account whose doctrine this is), `role` = owner | collaborator.
+
+### doctrine
+Standing rules set once by an owner; every job honors them (README → Human-in-the-loop).
+`owner_id`, `targets` (roles/companies to pursue — a structured list, not prose), `tone text`, `salary_stance jsonb`, `revision int` bumped on each save. A job reads the revision it started under and says so in its action log row.
+
+### resume_sources
+The one source of truth per user (README → Package model).
+`owner_id`, `doc_key` (e.g. `resume-source`), `revision int`, `sha256`, `updated_at`. One active row per (owner, doc_key); superseded rows stay for lineage.
+
+### flavors
+Versioned role resumes derived from the source; the seed set ships as an example, not a requirement.
+`id`, `owner_id`, `doc_key` (`resume-ai-architect`, …), `revision int`, `derived_from → resume_sources.id` (the revision it was built from), `status` = active | retired. A source change regenerates flavors as NEW revisions; old ones stay, so a package can always name what it was built from.
+
+### postings
+Roles found by the scanning jobs.
+`id`, `owner_id`, `url text` unique per owner, `title`, `company`, `destination` (board or ATS), `found_at`.
+
+### submissions
+The tracked unit end-to-end (README → Submission tracking).
+`id`, `owner_id`, `posting_id FK`, `status` = found | package_ready | waiting_on_human | submitted | responded | interview | offer | closed, `whose_turn` = persona | human, `approved_by user_id nullable`, `approved_at nullable`, `submitted_at nullable`, `evidence_ref → blobs nullable`.
+
+### packages
+The exact thing sent — never reconstructed from memory. One row per attempt; a retry is a new row.
+`id`, `submission_id FK`, `flavor_refs jsonb` (doc_key + revision used), `cover_letter_ref → blobs nullable`, `form_answers jsonb nullable`, `sha256`.
+
+### gate_actions
+The queue the website puts front and center: one precise action at a time.
+`id`, `submission_id FK`, `kind` = captcha | login | 2fa | final_submit, `ask text` (the single precise thing to do), `opened_at`, `closed_at nullable`, `closed_by user_id nullable`, `verification_ref → blobs nullable`.
+
+### contacts
+People the owner talks to, optionally tied to a submission.
+`id`, `owner_id`, `submission_id FK nullable`, `name`, `email`, `title`, `notes text`.
+
+### followups
+Scheduled touches on a submission (thank-you note, nudge after N days).
+`id`, `submission_id FK`, `due_at timestamptz`, `kind text`, `done_at nullable`. Due rows are picked up by the job runner; a missed window runs once on recovery (see job_runs), never twice.
+
+### action_log
+Intent before, outcome after — every effectful act of any actor, human or citizen, through the API.
+`id`, `request_id text UNIQUE` (client-supplied; a retry or redelivery with the same id returns the original result instead of acting again → idempotent), `actor user_id`, `verb text` (`submission.approve`, `gate.complete`, …), `target jsonb` (kind + id), `intent_at timestamptz`, `outcome_at nullable`, `outcome` = in_flight | ok | error, `error_ref nullable`.
+
+### outbox
+Durable messages to airc, written in the SAME TRANSACTION as the state change they announce.
+`id`, `seq bigint` per destination, `destination text` (airc room/peer/topic), `request_id → action_log.id`, `payload jsonb`, `created_at`, `dispatched_at nullable`. A dispatcher drains it at-least-once; receivers dedupe on request_id, so delivery is effective-once.
+
+### job_runs
+The scheduler's memory — what ran when, and whether a missed window was already caught up.
+`id`, `job_key text` (`scan.postings`, `followups.due`, …), `due_ms bigint`, `started_at`, `finished_at nullable`, `status` = running | done | failed, `request_id → action_log.id`.
+
+### outcome_events
+Delayed, confounded signals from the world (README → Learning).
+`id`, `submission_id FK`, `kind` = response | no_response_after_n_days | interview_call | offer | rejection, `at timestamptz`, `source_ref nullable → blobs` (the reply itself, when consented), `consented bool`.
+
+### learning_links
+The join for cohort analysis: which package version and adapter produced a submission.
+`id`, `submission_id FK` (one per submission), `adapter_version text`, `reserved_for_synthesis bool` (unseen episodes are reserved before any synthesis). Cohort reports compare comparable postings across these rows — never single episodes — and read only consented outcome_events.
+
+## Relations
+
+```
+users ─< user_roles >─ users(owner)
+owner ─< doctrine · resume_sources ─< flavors
+owner ─< postings ─< submissions ─┬─< packages ─> blobs (resumes, cover letters)
+                          ├─< gate_actions      (≤1 open per submission)
+                          ├─< followups
+                          ├─< outcome_events
+                          └─< learning_links
+submissions — contacts (optional, shared within an owner)
+action_log <— outbox (request_id) · action_log ← job_runs
+```
+
+## Invariants the schema enforces (not code goodwill)
+
+1. **One open gate per submission.** Unique partial index on `gate_actions(submission_id) WHERE closed_at IS NULL`. The queue can never show two asks for one submission.
+2. **Idempotent replay.** `action_log.request_id` is UNIQUE: a retried or redelivered act returns the original outcome instead of doing it twice.
+3. **Outbox in-transaction.** A state change and its outbox row commit together, or not at all — nothing announces a fact that never landed; no landing goes unannounced.
+4. **Exactly-once catch-up.** `job_runs` is unique per (job_key, due_ms): downtime produces one make-up run per missed window.
+5. **Ownership on every personal row.** Every table carrying personal content has `owner_id`; crossing owners requires a `user_roles` grant.
+6. **Lineage over mutation.** Sources and flavors keep their old revisions; packages name the exact revisions they used, so "what was sent" is always answerable after the fact.
+
+## Status of this document
+
+This is the contract; nothing here is implemented yet. The first code slice (app skeleton + ORM migrations for these tables) lands against it, and the e2e test pinned in the README — kill a component mid-flow, assert nothing lost or duplicated — exercises invariants 1–4 directly on real rows.
