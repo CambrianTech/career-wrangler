@@ -56,7 +56,7 @@ Scheduled touches on a submission (thank-you note, nudge after N days).
 
 ### action_log
 Intent before, outcome after — every effectful act of any actor, human or citizen, through the API.
-`id`, `request_id text UNIQUE` (client-supplied; a retry or redelivery with the same id returns the original result instead of acting again → idempotent), `actor user_id`, `verb text` (`submission.approve`, `gate.complete`, …), `target jsonb` (kind + id), `intent_at timestamptz`, `outcome_at nullable`, `outcome` = in_flight | ok | error, `error_ref nullable`.
+`id`, `request_id text UNIQUE` (derived by the API as a hash of actor + verb + target — unique per actor; a retry or redelivery returns the original outcome instead of acting again → invariant 2), `actor user_id`, `verb text` (`submission.approve`, `gate.complete`, …), `target jsonb` (kind + id), `intent_at timestamptz`, `outcome_at nullable`, `outcome` = in_flight | ok | error, `error_ref nullable`. An `in_flight` row whose verb has an external effect is never re-executed on retry — it opens a gate (invariant 3).
 
 ### outbox
 Durable messages to airc, written in the SAME TRANSACTION as the state change they announce.
@@ -64,7 +64,7 @@ Durable messages to airc, written in the SAME TRANSACTION as the state change th
 
 ### job_runs
 The scheduler's memory — what ran when, and whether a missed window was already caught up.
-`id`, `job_key text` (`scan.postings`, `followups.due`, …), `due_ms bigint`, `started_at`, `finished_at nullable`, `status` = running | done | failed, `request_id → action_log.id`.
+`id`, `job_key text` (`scan.postings`, `followups.due`, …), `due_ms bigint`, `started_at`, `finished_at nullable`, `status` = running | done | failed, `lease_owner user_id nullable`, `lease_expires_at timestamptz nullable` (a lapsed lease lets another runner take over the window → invariant 5), `request_id → action_log.id`. The unique key on (job_key, due_ms) lives in the table itself, enforced by the database.
 
 ### outcome_events
 Delayed, confounded signals from the world (README → Learning).
@@ -91,11 +91,13 @@ action_log <— outbox (request_id) · action_log ← job_runs
 ## Invariants the schema enforces (not code goodwill)
 
 1. **One open gate per submission.** Unique partial index on `gate_actions(submission_id) WHERE closed_at IS NULL`. The queue can never show two asks for one submission.
-2. **Idempotent replay.** `action_log.request_id` is UNIQUE: a retried or redelivered act returns the original outcome instead of doing it twice.
-3. **Outbox in-transaction.** A state change and its outbox row commit together, or not at all — nothing announces a fact that never landed; no landing goes unannounced.
-4. **Exactly-once catch-up.** `job_runs` is unique per (job_key, due_ms): downtime produces one make-up run per missed window.
-5. **Ownership on every personal row.** Every table carrying personal content has `owner_id`; crossing owners requires a `user_roles` grant.
-6. **Lineage over mutation.** Sources and flavors keep their old revisions; packages name the exact revisions they used, so "what was sent" is always answerable after the fact.
+2. **Idempotent replay, bound to the actor.** `action_log.request_id` is derived by the API as a hash of (actor, verb, target), UNIQUE per actor: a retried or redelivered act returns the original outcome instead of doing it twice, and no user's key can shadow another's.
+3. **No blind re-execution past the world.** An `in_flight` act whose verb has an external effect (submit, post) is never retried after its window closes — we cannot know whether the outside received it. It opens a `gate_action`; a human decides resend or close. The kill-mid-flow test exercises this invariant first.
+4. **Outbox in-transaction.** A state change and its outbox row commit together, or not at all — nothing announces a fact that never landed; no landing goes unannounced.
+5. **Exactly-once catch-up, takeable by lease.** `job_runs` is unique per (job_key, due_ms) as a table constraint in the migration, so downtime produces one make-up run per missed window: each missed window runs once, not "latest wins". A running row holds a lease (`lease_owner`, `lease_expires_at`); when it lapses — runner killed — another may take over the same window instead of wedging it.
+6. **Ownership on every personal row.** Every table carrying personal content has `owner_id`; crossing owners requires a `user_roles` grant. Blobs are owner-scoped rows: two owners sharing one file get two rows (one per owner), so deletion and privacy stay exact; the cost is a little duplicate storage.
+7. **Submitted means approved.** CHECK constraint on `submissions`: state `submitted` requires `approved_by` set — no row announces an external send that nobody approved.
+8. **Lineage over mutation.** Sources and flavors keep their old revisions; packages name the exact revisions they used, so "what was sent" is always answerable after the fact.
 
 ## Status of this document
 
