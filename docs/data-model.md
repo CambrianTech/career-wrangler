@@ -36,23 +36,23 @@ Roles found by the scanning jobs.
 
 ### submissions
 The tracked unit end-to-end (README → Submission tracking).
-`id`, `owner_id`, `posting_id FK`, `status` = found | package_ready | waiting_on_human | submitted | responded | interview | offer | closed, `whose_turn` = persona | human, `approved_by user_id nullable`, `approved_at nullable`, `submitted_at nullable`, `evidence_ref → blobs nullable`.
+`id`, `owner_id`, `posting_id FK`, `status` = found | package_ready | waiting_on_human | submitted | responded | interview | offer | closed, `whose_turn` = persona | human, `approved_by user_id nullable`, `approved_at nullable`, `submitted_at nullable`, `evidence_ref → blobs nullable`. The pair `(id, owner_id)` carries a unique index: it is the referenced target of the composite foreign keys children use to ride ownership down from here.
 
 ### packages
 The exact thing sent — never reconstructed from memory. One row per attempt; a retry is a new row.
-`id`, `owner_id`, `submission_id FK` — unique on `(submission_id, owner_id)`, so a join can never cross owners through the submission (invariant 6), `flavor_refs jsonb` (doc_key + revision used), `cover_letter_ref → blobs nullable`, `form_answers jsonb nullable`, `sha256`.
+`id`, `owner_id`, composite FK `(submission_id, owner_id) → submissions(id, owner_id)` — ownership rides down by referential integrity (invariant 6), and there is NO unique on that pair: one row per attempt; a retry is a new row. `flavor_refs jsonb` (doc_key + revision used), `cover_letter_ref → blobs nullable`, `form_answers jsonb nullable`, `sha256`.
 
 ### gate_actions
 The queue the website puts front and center: one precise action at a time.
-`id`, `owner_id`, `submission_id FK` — unique on `(submission_id, owner_id)` (invariant 6), `kind` = captcha | login | 2fa | final_submit, `ask text` (the single precise thing to do), `opened_at`, `closed_at nullable`, `closed_by user_id nullable`, `verification_ref → blobs nullable`.
+`id`, `owner_id`, composite FK `(submission_id, owner_id) → submissions(id, owner_id)` (invariant 6; no unique on that pair — closed gates stay in history and a new one opens after them; only invariant 1's partial index bounds the open ones), `kind` = captcha | login | 2fa | final_submit, `ask text` (the single precise thing to do), `opened_at`, `closed_at nullable`, `closed_by user_id nullable`, `verification_ref → blobs nullable`.
 
 ### contacts
 People the owner talks to, optionally tied to a submission.
-`id`, `owner_id`, `submission_id FK nullable`, `name`, `email`, `title`, `notes text`.
+`id`, `owner_id`, composite FK `(submission_id, owner_id) → submissions(id, owner_id)` with submission_id nullable (a contact can exist before any submission; invariant 6), `name`, `email`, `title`, `notes text`.
 
 ### followups
 Scheduled touches on a submission (thank-you note, nudge after N days).
-`id`, `submission_id FK`, `due_at timestamptz`, `kind text`, `done_at nullable`. Due rows are picked up by the job runner; a missed window runs once on recovery (see job_runs), never twice.
+`id`, `owner_id`, composite FK `(submission_id, owner_id) → submissions(id, owner_id)` (invariant 6 — same class of fix as packages and gate_actions), `due_at timestamptz`, `kind text`, `done_at nullable`. Due rows are picked up by the job runner; a missed window runs once on recovery (see job_runs), never twice.
 
 ### action_log
 Intent before, outcome after — every effectful act of any actor, human or citizen, through the API.
