@@ -1,8 +1,11 @@
 // test/invariants.test.mjs — slice-1 schema checks against docs/data-model.md (v4).
-// Invariants 1–8 live at the database level here: one migration per table, and
-// FKs / CHECKs / unique indexes do the enforcing — no code goodwill. Each check
-// opens a transaction on one shared in-memory DB and rolls back, so state never
-// leaks between checks.
+// Coverage is exact, not aspirational: invariants 1, 2, 5, 6, 7 are enforced at the
+// database level here (one migration per table; FKs / CHECKs / unique indexes do the
+// enforcing) and each has a check below. Invariants 3, 4, 8 — no blind re-execution
+// past the world, outbox-in-transaction discipline, lineage over mutation — are
+// behavioral: PENDING with the act layer, not the schema; they are NOT claimed here.
+// Each check opens a transaction on one shared in-memory DB and rolls back, so state
+// never leaks between checks.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
