@@ -42,8 +42,9 @@ export function start({ dbFile = DB_FILE, autoMigrate = true } = {}) {
         FROM submissions s JOIN postings p ON p.id = s.posting_id
         ORDER BY s.created_at DESC`).all();
       // At most one OPEN gate per submission (invariant 1) — the partial unique index makes this a projection.
+      // Field names are the v4 schema's own (kind/ask/opened_at); the page renders them as-is.
       const gates = db.prepare(`
-        SELECT ga.submission_id, ga.owner_id, ga.kind AS gate_type, ga.ask, ga.opened_at
+        SELECT ga.submission_id, ga.owner_id, ga.kind, ga.ask, ga.opened_at
         FROM gate_actions ga
         WHERE ga.closed_at IS NULL`).all();
       return { postings, submissions, gates };
