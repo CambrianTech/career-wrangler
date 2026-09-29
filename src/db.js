@@ -21,6 +21,11 @@ export function openDb(file) {
   return db;
 }
 
+// `StatementSync#get()` returns the row as a JS OBJECT keyed by column name —
+// `{ foreign_keys: 1 }` here — so read the value out of it. (Number(row) throws
+// "Cannot convert object to primitive value"; this guard is what migrate.js's
+// precondition relies on, and it has to actually work.)
 export function fkPragmaOn(db) {
-  return Number(db.prepare('PRAGMA foreign_keys;').get()) === 1;
+  const row = db.prepare('PRAGMA foreign_keys;').get();
+  return Number(Object.values(row ?? {})[0]) === 1;
 }

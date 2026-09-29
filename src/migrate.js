@@ -8,9 +8,13 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 import { openDb, fkPragmaOn } from './db.js';
 
-export const MIGRATIONS_DIR = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'migrations');
+// fileURLToPath (not new URL(import.meta.url).pathname): the pathname form is
+// '/C:/...' on Windows and win32 path functions mangle it into C:\C:\...
+const HERE = path.dirname(fileURLToPath(import.meta.url)); // .../src
+export const MIGRATIONS_DIR = path.join(HERE, '..', 'migrations');
 
 export function applyMigrations(db) {
   if (!fkPragmaOn(db)) {
@@ -42,8 +46,8 @@ export function applyMigrations(db) {
 }
 
 // `npm run migrate` — applies to the DB at $DATABASE_URL or data/career.sqlite.
-if (process.argv[1] && import.meta.url === new URL(`file://${path.resolve(process.argv[1])}`).href) {
-  const file = process.env.DATABASE_URL || path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'data', 'career.sqlite');
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  const file = process.env.DATABASE_URL || path.join(HERE, '..', 'data', 'career.sqlite');
   const db = openDb(file);
   const { applied, total } = applyMigrations(db);
   console.log(`migrations: ${applied} applied, ${total} present (${file})`);
