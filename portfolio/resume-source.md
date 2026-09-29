@@ -1,4 +1,4 @@
-<!-- SOURCE RESUME. Tailor per target; do not send this file raw.
+<!-- MASTER SOURCE RESUME. Canonical career record / superset. Tailor per target; do not send this file raw.
      Title line by category:
        Perception / autonomy   Principal Perception & Edge AI Engineer
                                Computer Vision · Spatial Computing · Autonomous Systems · ML Systems
@@ -6,6 +6,8 @@
                                LLM Architecture · Inference · Model Efficiency · Continual Learning
        General hard systems    Principal / Staff Systems Engineer
                                AI · Computer Vision · High-Performance Computing · Edge Systems
+       Hardware / edge         Principal Systems / Edge AI Engineer
+                               Embedded Systems · GPU Compute · Robotics · Intelligent Hardware
        Security                Sr Engineer, Cybersecurity — see resume-security.md
 -->
 
@@ -144,23 +146,38 @@ was reused for the Android implementation. Also built iOS fitness, media, and ot
 applications.
 
 **VML** — Software Engineer · 2006–2010. Full-stack agency engineering for major brands:
-C#/.NET and CMS-backed web systems, frontend work, databases/SQL, and some Java, spanning
-customer-facing experiences and backend integrations.
+C#/.NET and CMS-backed web systems, frontend work, databases/SQL, Java, and early native
+mobile. Designed database structures and layered client/server systems using JSON, SOAP and
+REST services; built CMS integrations and jQuery plugins and used NUnit for automated testing.
 
 **AgileWise** — Hardware & Software Engineer · 2005–2006. Designed PCB-level embedded
-hardware and a touchscreen computer/phone prototype; integrated the LCD, wrote display-driver
-and platform code, brought up Windows CE and later Linux, and worked with RFID and low-level
-device integration.
+hardware and a touchscreen computer/phone prototype; integrated LCD and RFID hardware, wrote
+display-driver and platform code, created a Windows CE OS/platform image, later brought up
+Linux, and built device/server software spanning Compact Framework applications, web services,
+database procedures, and low-level device integration.
 
-**NovaStar Financial and independent contracting** — Backend, web, database, and application
-engineering across a range of client and internal systems.
+**VML (contract)** — Software Engineer · 2005 and later contracting. Built backend
+infrastructure for Bluetooth.com in C#/ASP.NET; produced UML/design documentation and
+customized CMS/SharePoint systems and web parts.
 
-**Federal Home Loan Bank of Topeka** — Enterprise application and database development,
-including ASP.NET/C# and SQL-backed systems.
+**NovaStar Financial** — Software Engineer · 2004–2005. Built business applications for loan
+underwriting, including SQL Server stored procedures, COM components, and C#/.NET systems.
 
-**AllofE Solutions** — Software Engineer · 1999–2002. Full-stack web and backend engineering
-using PHP, Perl, Java, LAMP/MySQL, SQL, and early web application stacks; extensive database
-work.
+**Federal Home Loan Bank of Topeka** — Software Engineer · 2002–2004. Built ASP.NET/C#
+accounting software for internal users and client banks using SQL-backed, three-tier
+application architectures.
+
+**AllofE Solutions** — Software Engineer · 2000–2002. Full-stack B2B application development
+for Kansas City-area customers using PHP, Perl, Java, LAMP/MySQL and SQL. Designed database
+schemas and carried products through implementation, deployment, and maintenance.
+
+**Midwestern Electronics** — Electronics Assembly · 1999. Assembled and soldered PCBs used
+by Allied Signal and government customers.
+
+**Independent hardware / robotics design.** Built low-level hardware including stepper-motor
+drivers, servo controllers, sensors, digitally controlled lighting, and mobile-device
+prototypes using ARM microcontrollers, GSM modules, LCDs, MOSFETs, and mixed digital/analog
+components. Experience interfacing evaluation boards and building autonomous-robot hardware.
 
 Across these roles and later startups, repeatedly built full-stack systems end to end,
 including relational schemas and SQL, custom ORMs, web servers, backend services, frontend
@@ -225,6 +242,11 @@ Server, MySQL, PostgreSQL, and SQLite, plus NoSQL/Dgraph; designed schemas and r
 wrote custom ORMs and web servers. Message-driven systems, data/ML pipelines, automated
 backend testing, and production SDK/service integration.
 
+**Hardware and embedded design** — PCB design and assembly; ARM microcontrollers; LCD/display
+integration and display drivers; RFID; stepper/servo control; sensors; GSM modules; MOSFET and
+mixed digital/analog prototyping; Windows CE platform/OS bring-up; embedded Linux; autonomous
+robot hardware.
+
 **GPU, native and embedded** — SIMD; Metal, CUDA, OpenGL/GLSL, OpenGL ES GPGPU, WebGL and
 shader pipelines; GPUImage-era mobile GPU work; native camera/media pipelines; iOS and
 Android/JNI; embedded Linux and Windows CE; PCB design, hardware bring-up and display-driver
@@ -247,6 +269,10 @@ browser ML, native camera pipelines, embedded and PCB-level hardware.
 
 **B.S. Computer Engineering — University of Kansas**
 
+Coursework included digital circuit design, programming, robotics, computer architecture, and
+advanced mathematics. Assisted with initial design work on the NASA/NSF-funded PRISM robot
+before entering industry.
+
 - **US10964097B2** — *Pattern Recognition Systems and Methods for Performing Segmentation on
   Surfaces and Objects* (2021, Cambrian Tech LLC). First-named inventor.
 - **US9665784B2** — *Systems and Methods for Spoof Detection and Liveness Analysis* (2017).
@@ -254,3 +280,33 @@ browser ML, native camera pipelines, embedded and PCB-level hardware.
   2014).
 - $100,000 LaunchKC grand prize (2017); top-five finalist, Atlanta Startup
   Battle 6.0 (2019, TechSquare Labs).
+
+---
+
+## Source Notes / Facts Worth Preserving
+
+These are canonical facts for tailoring, not necessarily bullets for every submitted resume.
+
+- Full-stack software engineering dates to 1999; mobile was a deployment target, not the discipline.
+- Hardware experience is real and early: PCB assembly/design, drivers, OS/platform bring-up,
+  microcontrollers, sensors, motor control, RFID, GSM/LCD integration, and autonomous-robot hardware.
+- Enterprise/business software predates Cambrian: B2B web systems, banking/accounting,
+  loan-underwriting software, databases, SQL, web services, CMS platforms, testing, and layered architectures.
+- Cambrian was a functioning technology company, not a hobby project: company leadership,
+  hiring/team leadership, customer discovery, sales, partnerships, licensing, agency/customer SDK
+  integration, product delivery, enterprise engagements, and substantial technical R&D.
+- Cambrian's product forms included SDKs, native applications, web platforms, backend/cloud
+  systems, still-image processing, real-time AR, and automotive/spatial-computing work.
+- Preserve the distinction between company-level Garmin/BMW work and individual contribution:
+  Heather Spalding led that program; Joel contributed early perception/algorithm work and technical
+  discussions while leading related Cambrian perception/platform work.
+- EyeVerify demonstrates production biometrics/CV, SDK productization, patents, and acquisition;
+  it should not eclipse the technically broader Cambrian work.
+- TripleBlind/TB Holdings/Ideem was 2023–2026, contract then full-time, focused on
+  cryptographic authentication/client SDK engineering while Cambrian continued.
+- Current AI work includes Continuum, Sentinel-AI, AIRC, model compaction, distributed systems,
+  inference/runtime work, continual learning, evaluation/provenance, multimodal systems, and
+  heterogeneous compute.
+- Historical Cambrian material documents Fortune 500 licensing, national magazine/TV advertising,
+  and more than five million users at the time.
+- Do not put birth date or full street address on modern resumes.
