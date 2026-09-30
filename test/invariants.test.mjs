@@ -118,17 +118,76 @@ test('happy path: approved submission + same-owner package roundtrip', () => {
   });
 });
 
-test('tracker projection: postings/submissions join on v4 columns', () => {
+test('resolvePinnedOwner: multi-owner demands explicit pin; single auto-pins; empty resolves null', () => {
+  delete process.env.OWNER_ID;
+  assert.throws(() => resolvePinnedOwner(db), /multi-owner database.*u-a.*u-b/);
+  const one = openDb(':memory:'); applyMigrations(one);
+  one.prepare(`INSERT INTO users (id,name,kind,created_at) VALUES ('u-s','S','human',0)`).run();
+  assert.equal(resolvePinnedOwner(one).id, 'u-s');
+  one.close();
+  const none = openDb(':memory:'); applyMigrations(none);
+  assert.equal(resolvePinnedOwner(none).id, null);
+  none.close();
+});
+
+test('tracker projection via production statements: two-owner isolation', () => {
+  // Shared db holds exactly u-a and u-b (seed owners; every earlier test rolled back).
   withRollback(() => {
-    insPosting('u-a');
-    insSubmission('s-3', 'u-a', 'waiting_on_human');
-    const rows = db.prepare(`
-      SELECT s.id, s.posting_id, s.owner_id, s.status, s.approved_by, s.created_at,
-             p.title AS posting_title, p.company AS posting_company
-      FROM submissions s JOIN postings p ON p.id = s.posting_id`).all();
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].posting_title, 'T');
-    const gates = db.prepare(`SELECT submission_id, owner_id, kind, ask, opened_at FROM gate_actions WHERE closed_at IS NULL`).all();
-    assert.deepEqual(gates, []);
+    const row = (owner, tag) => {
+      db.prepare(`INSERT INTO postings (id,owner_id,url,title,company,destination,found_at,created_at)
+                  VALUES (?,?,'https://x.example/','T','C','board',0,0)`).run(`${tag}-p`, owner);
+      db.prepare(`INSERT INTO submissions (id,owner_id,posting_id,status,whose_turn,approved_by,created_at)
+                  VALUES (?,?,?,'waiting_on_human','human',NULL,0)`).run(`${tag}-s`, owner, `${tag}-p`);
+    };
+    row('u-a', 'a');
+    row('u-b', 'b');
+    db.prepare(`INSERT INTO gate_actions (id,submission_id,owner_id,kind,ask,opened_at)
+                VALUES ('g-b','b-s','u-b','approve','ship?',0)`).run();
+
+    const ta = makeTrackerStatements(db, resolvePinnedOwner(db, 'u-a'));
+    assert.deepEqual(ta.postings().map((p) => p.id), ['a-p']);
+    assert.equal(ta.submissions().length, 1);
+    assert.equal(ta.submissions()[0].id, 'a-s');
+    assert.deepEqual(ta.gates(), []);
+
+    const tb = makeTrackerStatements(db, resolvePinnedOwner(db, 'u-b'));
+    assert.deepEqual(tb.postings().map((p) => p.id), ['b-p']);
+    assert.equal(tb.submissions()[0].id, 'b-s');
+    assert.equal(tb.gates().length, 1);
+    assert.equal(tb.gates()[0].submission_id, 'b-s');
   });
+});
+
+test('HTTP boundary: loopback bind, PORT=0 actual addr, ?owner_id cannot move the pin', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-http-'));
+  const dbFile = path.join(dir, 't.sqlite');
+  const seed = openDb(dbFile);
+  applyMigrations(seed);
+  seed.prepare(`INSERT INTO users (id,name,kind,created_at)
+                VALUES ('u-a','A','human',0),('u-b','B','citizen','p-b',0)`).run();
+  seed.prepare(`INSERT INTO postings (id,owner_id,url,title,company,destination,found_at,created_at)
+                VALUES ('a-p','u-a','https://x.example/','T','C','board',0,0),
+                       ('b-p','u-b','https://y.example/','U','D','board',1,1)`).run();
+  seed.close();
+  process.env.PORT = '0';
+  process.env.OWNER_ID = 'u-a';
+  delete process.env.HOST;
+  try {
+    const h = await start({ dbFile });
+    try {
+      assert.equal(h.addr.address, '127.0.0.1'); // loopback by default, never all interfaces
+      assert.ok(h.addr.port > 0); // PORT=0: actual ephemeral address reported, not the requested one
+      const r = await fetch(`http://127.0.0.1:${h.addr.port}/api/tracker?owner_id=u-b`);
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      assert.deepEqual(body.postings.map((p) => p.id), ['a-p']); // pinned u-a at launch; ?owner_id ignored
+    } finally {
+      h.server.close();
+      h.db.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    delete process.env.PORT;
+    delete process.env.OWNER_ID;
+  }
 });
