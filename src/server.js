@@ -24,38 +24,54 @@ const PUBLIC_DIR = path.join(HERE, '..', 'public');
 // docs/data-model.md: the DB file lives in data/ unless DATABASE_URL says otherwise.
 const DB_FILE = process.env.DATABASE_URL || path.join(HERE, '..', 'data', 'career.sqlite');
 
+// Local-use owner boundary (review 3b39c978): the unauthenticated tracker serves exactly ONE
+// pipeline per process. The pinned owner is a launch-time decision — explicit OWNER_ID on a
+// multi-owner database, auto-pinned (and announced) when it holds a single user — never request
+// input: in an unauthenticated skeleton any query parameter would be unchecked by construction.
+export function resolvePinnedOwner(db, requested = process.env.OWNER_ID || null) {
+  const users = db.prepare('SELECT id, name FROM users ORDER BY created_at').all();
+  if (requested) {
+    const hit = users.find((u) => u.id === requested);
+    if (!hit) throw new Error(`owner ${JSON.stringify(requested)} not found in users; available: ${users.map((u) => u.id).join(', ') || '(none)'}`);
+    return hit;
+  }
+  if (users.length === 1) return users[0];
+  if (users.length > 1) throw new Error(`multi-owner database (${users.map((u) => `${u.id} (${u.name})`).join(', ')}): set OWNER_ID to pin one pipeline per process`);
+  return { id: null, name: '(no users yet — nothing served until one exists)' };
+}
+
+// The three tracker projections, each filtered on the pinned owner. Exported so the isolation
+// test exercises the exact queries the server runs.
+export function makeTrackerStatements(db, owner) {
+  const o = owner.id;
+  return {
+    postings: () => db.prepare('SELECT id, title, company, url, found_at FROM postings WHERE owner_id = ? ORDER BY found_at DESC').all(o),
+    submissions: () => db.prepare(`
+      SELECT s.id, s.posting_id, s.owner_id, s.status, s.approved_by, s.created_at,
+             p.title AS posting_title, p.company AS posting_company
+      FROM submissions s JOIN postings p ON p.id = s.posting_id
+      WHERE s.owner_id = ? ORDER BY s.created_at DESC`).all(o),
+    // At most one OPEN gate per submission (invariant 1) — the partial unique index makes this a projection.
+    // Field names are the v4 schema's own (kind/ask/opened_at); the page renders them as-is.
+    gates: () => db.prepare(`
+      SELECT ga.submission_id, ga.owner_id, ga.kind, ga.ask, ga.opened_at
+      FROM gate_actions ga
+      WHERE ga.closed_at IS NULL AND ga.owner_id = ?`).all(o),
+  };
+}
+
 export function start({ dbFile = DB_FILE, autoMigrate = true } = {}) {
   const db = openDb(dbFile);
   if (autoMigrate) applyMigrations(db); // idempotent; migration_log guards re-runs
-
-  const statements = {
-    health: () => ({
-      ok: true,
-      foreign_keys: fkPragmaOn(db),
-      tables: db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`).all().map((r) => r.name),
-    }),
-    tracker() {
-      const postings = db.prepare('SELECT id, title, company, url, found_at FROM postings ORDER BY found_at DESC').all();
-      const submissions = db.prepare(`
-        SELECT s.id, s.posting_id, s.owner_id, s.status, s.approved_by, s.created_at,
-               p.title AS posting_title, p.company AS posting_company
-        FROM submissions s JOIN postings p ON p.id = s.posting_id
-        ORDER BY s.created_at DESC`).all();
-      // At most one OPEN gate per submission (invariant 1) — the partial unique index makes this a projection.
-      // Field names are the v4 schema's own (kind/ask/opened_at); the page renders them as-is.
-      const gates = db.prepare(`
-        SELECT ga.submission_id, ga.owner_id, ga.kind, ga.ask, ga.opened_at
-        FROM gate_actions ga
-        WHERE ga.closed_at IS NULL`).all();
-      return { postings, submissions, gates };
-    },
-  };
+  const owner = resolvePinnedOwner(db); // throws with a named-owner error on an unpinned multi-owner DB
+  const t = makeTrackerStatements(db, owner);
 
   const server = createServer((req, res) => {
     try {
       const url = new URL(req.url, 'http://localhost');
-      if (url.pathname === '/api/health') return sendJson(res, statements.health());
-      if (url.pathname === '/api/tracker') return sendJson(res, statements.tracker());
+      if (url.pathname === '/api/health') return sendJson(res, healthPayload(db));
+      if (url.pathname === '/api/tracker')
+        return sendJson(res, { postings: t.postings(), submissions: t.submissions(), gates: t.gates() });
 
       // Static: only under PUBLIC_DIR. / → tracker.html; anything else must exist there.
       const rel = url.pathname === '/' ? 'tracker.html' : url.pathname.replace(/^\/+/, '');
@@ -79,8 +95,16 @@ export function start({ dbFile = DB_FILE, autoMigrate = true } = {}) {
     // Local-use boundary (review 3b39c978): the unauthenticated tracker binds loopback by
     // default. HOST is an explicit opt-out for container fronting — never a per-request input.
     const host = process.env.HOST || '127.0.0.1';
-    server.listen(port, host, () => resolve({ port, host, db }));
+    server.listen(port, host, () => resolve({ addr: server.address(), db }));
   });
+}
+
+function healthPayload(db) {
+  return {
+    ok: true,
+    foreign_keys: fkPragmaOn(db),
+    tables: db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`).all().map((r) => r.name),
+  };
 }
 
 function sendJson(res, obj, status = 200) {
@@ -88,9 +112,10 @@ function sendJson(res, obj, status = 200) {
   res.end(JSON.stringify(obj, null, 2));
 }
 
-// `npm run dev` — boot and stay up.
+// `npm run dev` — boot and stay up. Banner prints the ACTUAL bound address (server.address()),
+// so PORT=0 or a host override is never misreported.
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  start().then(({ port }) => {
-    console.log(`career-wrangler: tracker on http://localhost:${port}/ (db ${DB_FILE})`);
+  start().then(({ addr }) => {
+    console.log(`career-wrangler: tracker on http://${addr.address}:${addr.port}/ (db ${DB_FILE})`);
   });
 }
