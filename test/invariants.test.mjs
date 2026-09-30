@@ -150,10 +150,15 @@ test('tracker projection via production statements: two-owner isolation', () => 
     db.prepare(`INSERT INTO gate_actions (id,submission_id,owner_id,kind,ask,opened_at)
                 VALUES ('g-b','b-s','u-b','final_submit','Submit the application?',0)`).run();
 
+    // Mismatched relationship — legal under migration 008: A's submission referencing B's posting.
+    db.prepare(`INSERT INTO submissions (id,owner_id,posting_id,status,whose_turn,approved_by,created_at)
+                VALUES ('x-s','u-a','b-p','waiting_on_human','human',NULL,0)`).run();
+
     const ta = makeTrackerStatements(db, resolvePinnedOwner(db, 'u-a'));
     assert.deepEqual(ta.postings().map((p) => p.id), ['a-p']);
-    assert.equal(ta.submissions().length, 1);
+    assert.equal(ta.submissions().length, 1); // x-s excluded by owner equality on the join
     assert.equal(ta.submissions()[0].id, 'a-s');
+    assert.ok(ta.submissions().every((s) => s.posting_id !== 'b-p')); // B's title/company never reach A's tracker
     assert.deepEqual(ta.gates(), []);
 
     const tb = makeTrackerStatements(db, resolvePinnedOwner(db, 'u-b'));

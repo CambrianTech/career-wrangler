@@ -49,7 +49,7 @@ export function makeTrackerStatements(db, owner) {
     submissions: () => db.prepare(`
       SELECT s.id, s.posting_id, s.owner_id, s.status, s.approved_by, s.created_at,
              p.title AS posting_title, p.company AS posting_company
-      FROM submissions s JOIN postings p ON p.id = s.posting_id
+      FROM submissions s JOIN postings p ON p.id = s.posting_id AND p.owner_id = s.owner_id
       WHERE s.owner_id = ? ORDER BY s.created_at DESC`).all(o),
     // At most one OPEN gate per submission (invariant 1) — the partial unique index makes this a projection.
     // Field names are the v4 schema's own (kind/ask/opened_at); the page renders them as-is.
