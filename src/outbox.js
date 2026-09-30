@@ -34,7 +34,8 @@ function insertOutbox(db, { destination, actionId, payload, now }) {
   db.prepare(
     `INSERT INTO outbox (id, seq, destination, request_id, payload, created_at)
      VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(randomUUID(), seq, destination, actionId, JSON.stringify(payload), now);
+  // no payload means an empty announcement body — node:sqlite refuses to bind `undefined`
+  ).run(randomUUID(), seq, destination, actionId, JSON.stringify(payload ?? {}), now);
 }
 
 // Land an act: one BEGIN IMMEDIATE ... COMMIT that records the intent, applies

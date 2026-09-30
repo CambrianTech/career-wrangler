@@ -152,7 +152,8 @@ test('dispatcher leaves at-least-once: kill mid-drain → restart re-delivers; r
   for (const n of [1, 2, 3]) {
     act(db, {
       actor: 'u-a', requestId: `req-d${n}`, verb: 'posting.tracked', target: { n },
-      announce: [{ destination: 'room/tracker', payload: { actor: 'u-a', request_id: `req-d${n}`, verb: 'posting.tracked' } }],
+      // the announcement is self-contained — a receiver can't re-query the sender's store, so it carries n
+      announce: [{ destination: 'room/tracker', payload: { actor: 'u-a', request_id: `req-d${n}`, verb: 'posting.tracked', n } }],
     });
   }
 
@@ -168,7 +169,7 @@ test('dispatcher leaves at-least-once: kill mid-drain → restart re-delivers; r
     deliveries.push(`${p.actor}|${p.request_id}`);
     act(recvDb, { actor: p.actor, requestId: p.request_id, verb: 'outbox.apply', target: { n: p.n }, mutate(d) {
       d.prepare(`INSERT INTO postings (id,owner_id,url,title,company,destination,found_at,created_at)
-                VALUES ('p-d' || ?,'u-a','https://x.example/','T','C','board',0,0)`).run(p.n);
+                VALUES ('p-d' || ?,'u-a','https://x.example/d' || ?, 'T','C','board',0,0)`).run(p.n, p.n);
     } });
   }
 
@@ -200,4 +201,6 @@ test('dispatcher leaves at-least-once: kill mid-drain → restart re-delivers; r
   assert.equal(deliveries.filter((k) => k === 'u-a|req-d1').length, 2, 'row 1 was delivered twice…');
   assert.ok(deliveries.every((k) => deliveries.filter((x) => x === k).length <= 2));
   assert.equal(count(db, 'SELECT COUNT(*) c FROM outbox WHERE dispatched_at IS NULL'), 0);
+
+  db.close(); recvDb.close(); // release handles before the after-hook removes the dir (Windows EPERM otherwise)
 });
