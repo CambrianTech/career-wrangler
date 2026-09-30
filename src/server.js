@@ -95,7 +95,9 @@ export function start({ dbFile = DB_FILE, autoMigrate = true } = {}) {
     // Local-use boundary (review 3b39c978): the unauthenticated tracker binds loopback by
     // default. HOST is an explicit opt-out for container fronting — never a per-request input.
     const host = process.env.HOST || '127.0.0.1';
-    server.listen(port, host, () => resolve({ addr: server.address(), db }));
+    // `server` is returned so callers (tests) can close the handle; unref-style cleanup
+    // isn't a thing here — an open listener keeps the process alive until it's closed.
+    server.listen(port, host, () => resolve({ addr: server.address(), db, server }));
   });
 }
 

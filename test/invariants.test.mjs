@@ -9,8 +9,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { openDb, fkPragmaOn } from '../src/db.js';
 import { applyMigrations } from '../src/migrate.js';
+// Importing the server module is side-effect-free: its boot guard only fires when
+// src/server.js itself is process.argv[1], never under node:test.
+import { start, resolvePinnedOwner, makeTrackerStatements } from '../src/server.js';
 
 const db = openDb(':memory:');
 
@@ -142,7 +148,7 @@ test('tracker projection via production statements: two-owner isolation', () => 
     row('u-a', 'a');
     row('u-b', 'b');
     db.prepare(`INSERT INTO gate_actions (id,submission_id,owner_id,kind,ask,opened_at)
-                VALUES ('g-b','b-s','u-b','approve','ship?',0)`).run();
+                VALUES ('g-b','b-s','u-b','final_submit','Submit the application?',0)`).run();
 
     const ta = makeTrackerStatements(db, resolvePinnedOwner(db, 'u-a'));
     assert.deepEqual(ta.postings().map((p) => p.id), ['a-p']);
@@ -163,8 +169,8 @@ test('HTTP boundary: loopback bind, PORT=0 actual addr, ?owner_id cannot move th
   const dbFile = path.join(dir, 't.sqlite');
   const seed = openDb(dbFile);
   applyMigrations(seed);
-  seed.prepare(`INSERT INTO users (id,name,kind,created_at)
-                VALUES ('u-a','A','human',0),('u-b','B','citizen','p-b',0)`).run();
+  seed.prepare(`INSERT INTO users (id,name,kind,peer_id,created_at)
+                VALUES ('u-a','A','human',NULL,0),('u-b','B','citizen','p-b',0)`).run();
   seed.prepare(`INSERT INTO postings (id,owner_id,url,title,company,destination,found_at,created_at)
                 VALUES ('a-p','u-a','https://x.example/','T','C','board',0,0),
                        ('b-p','u-b','https://y.example/','U','D','board',1,1)`).run();
