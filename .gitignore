@@ -1,2 +1,4 @@
 data/
 *.sqlite
+.server.pid
+receipt-server.log

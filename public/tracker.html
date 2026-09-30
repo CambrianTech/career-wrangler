@@ -15,8 +15,9 @@ thead th { background: #1c2230; color: #cfd5e4; font-weight: 600;
           border-bottom: 1px solid #3a4152; }
 tbody tr + tr td { border-top: 1px solid #232837; }
     th, td { text-align: left; padding: 0.4rem 0.6rem; font-size: 0.9rem; }
-td[colspan="4"] { padding-top: 1.1rem; padding-bottom: 1.1rem; text-align: center;
-                  color: #9aa3b8; }
+    td[colspan="4"] { padding: 0; }
+    .empty { display: block; margin: 0.5rem; padding: 1.25rem 1rem; text-align: center; color: #9aa3b8;
+             border: 1px dashed #3a4152; border-radius: 0.5rem; background: rgba(28, 34, 48, 0.45); }
     .pill { display: inline-block; padding: 0.05rem 0.5rem; border-radius: 0.8rem; font-size: 0.75rem; background: #262b3a; }
     .gate { color: #ffd479; }
     footer { margin-top: 1.5rem; }
@@ -64,7 +65,7 @@ td[colspan="4"] { padding-top: 1.1rem; padding-bottom: 1.1rem; text-align: cente
             <td>${esc(s.posting_company)}</td>
             <td><span class="pill">${esc(s.status)}${s.approved_by ? ' ✓' : ''}</span></td>
             <td class="muted">${s.created_at ? new Date(s.created_at).toLocaleString() : '—'}</td>
-          </tr>`).join('') || '<tr><td colspan="4" class="muted">no submissions yet</td></tr>';
+          </tr>`).join('') || '<tr><td colspan="4"><div class="empty">no submissions yet — the first act lands in action_log, then leaves through the outbox</div></td></tr>';
 
         if (tracker.gates.length) {
           $('gate-note').textContent = '';
