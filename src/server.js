@@ -76,7 +76,10 @@ export function start({ dbFile = DB_FILE, autoMigrate = true } = {}) {
 
   return new Promise((resolve) => {
     const port = Number(process.env.PORT || 3179);
-    server.listen(port, () => resolve({ port, db }));
+    // Local-use boundary (review 3b39c978): the unauthenticated tracker binds loopback by
+    // default. HOST is an explicit opt-out for container fronting — never a per-request input.
+    const host = process.env.HOST || '127.0.0.1';
+    server.listen(port, host, () => resolve({ port, host, db }));
   });
 }
 
