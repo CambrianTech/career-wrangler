@@ -43,6 +43,7 @@ tbody tr + tr td { border-top: 1px solid #232837; }
 
   <footer>
     <span class="pill" id="fk">foreign_keys: …</span>
+    <span class="pill" id="refreshed">last refresh: —</span>
     <span class="muted">slice 1 skeleton — read-only over SQLite (node:sqlite)</span>
   </footer>
 
@@ -58,6 +59,7 @@ tbody tr + tr td { border-top: 1px solid #232837; }
         ]);
         $('status').textContent = `${tracker.submissions.length} submissions · ${tracker.postings.length} postings`;
         $('fk').textContent = `foreign_keys: ${health.foreign_keys ? 'ON' : 'OFF (bug!)'} · ${health.tables.length} tables`;
+        $('refreshed').textContent = 'last refresh: ' + new Date().toLocaleTimeString();
 
         $('submissions').innerHTML = tracker.submissions.map((s) => `
           <tr>
