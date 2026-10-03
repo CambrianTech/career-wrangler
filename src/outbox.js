@@ -12,7 +12,6 @@
 
 import { randomUUID } from 'node:crypto';
 
-const UNIQUE_ACTION = /UNIQUE constraint failed/i;
 
 function insertAction(db, actionId, actor, requestId, verb, targetJson, intentAt) {
   db.prepare(
@@ -32,7 +31,7 @@ function insertOutbox(db, { destination, actionId, payload, now }) {
       .get(destination).next
   );
   db.prepare(
-    `INSERT INTO outbox (id, seq, destination, request_id, payload, created_at)
+    `INSERT INTO outbox (id, seq, destination, action_id, payload, created_at)
      VALUES (?, ?, ?, ?, ?, ?)`
   // no payload means an empty announcement body — node:sqlite refuses to bind `undefined`
   ).run(randomUUID(), seq, destination, actionId, JSON.stringify(payload ?? {}), now);

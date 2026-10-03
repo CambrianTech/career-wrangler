@@ -85,7 +85,7 @@ owner ─< postings ─< submissions ─┬─< packages ─> blobs (resumes, co
                           ├─< outcome_events
                           └─< learning_links
 submissions — contacts (optional, shared within an owner)
-action_log <— outbox (request_id) · action_log ← job_runs
+action_log <— outbox (action_id) · action_log ← job_runs
 ```
 
 ## Invariants the schema enforces (not code goodwill)
