@@ -2,3 +2,4 @@ data/
 *.sqlite
 .server.pid
 receipt-server.log
+scratch-kimi-server.log
