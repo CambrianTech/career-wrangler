@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS outbox (
   id             TEXT PRIMARY KEY,                      -- uuid
   seq            INTEGER NOT NULL,                      -- bigint per destination
   destination    TEXT NOT NULL,                         -- airc room / peer / topic
-  action_id      TEXT NOT NULL REFERENCES action_log(id),
+  request_id     TEXT NOT NULL REFERENCES action_log(id),
   payload        TEXT NOT NULL CHECK (json_valid(payload)), -- jsonb
   created_at     INTEGER NOT NULL,                      -- epoch ms
   dispatched_at  INTEGER                                -- epoch ms, nullable

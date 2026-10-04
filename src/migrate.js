@@ -16,7 +16,10 @@ import { openDb, fkPragmaOn } from './db.js';
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // .../src
 export const MIGRATIONS_DIR = path.join(HERE, '..', 'migrations');
 
-export function applyMigrations(db) {
+// migrationsDir is a testability seam (default: the repo's migrations/): the old-base
+// upgrade test builds a pre-018 base through this same migrator, pointed at a copy of the
+// shipped files minus 018. Product behaviour is unchanged when the argument is omitted.
+export function applyMigrations(db, migrationsDir = MIGRATIONS_DIR) {
   if (!fkPragmaOn(db)) {
     throw new Error('refusing to migrate: PRAGMA foreign_keys must be ON (see src/db.js)');
   }
@@ -25,12 +28,12 @@ export function applyMigrations(db) {
     applied_at INTEGER NOT NULL
   )`);
 
-  const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).sort();
+  const files = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
   const done = new Set(db.prepare('SELECT name FROM migration_log').all().map((r) => r.name));
   let applied = 0;
   for (const file of files) {
     if (done.has(file)) continue;
-    const sql = readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
+    const sql = readFileSync(path.join(migrationsDir, file), 'utf8');
     db.exec('BEGIN IMMEDIATE');
     try {
       db.exec(sql);
