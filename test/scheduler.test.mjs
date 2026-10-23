@@ -153,6 +153,89 @@ test('killed runner: its lapsed window is taken over exactly once by another own
   assert.equal(dRuns, 2);
 });
 
+test('a stale holder finishing late cannot write done over its replacement — fencing epoch refuses it', async () => {
+  const db = freshDb();
+  insertUsers(db, 'u-a', 'u-b');
+  let clock = T0;
+  let releaseA, releaseB, ranByA = 0, ranByB = 0;
+
+  const schedA = createScheduler(db, { owner: 'u-a', leaseTtlMs: 10, now: () => clock });
+  const schedB = createScheduler(db, { owner: 'u-b', leaseTtlMs: 10, now: () => clock });
+  schedA.register('scan.postings', {
+    intervalMs: I,
+    run: async () => { ranByA += 1; await new Promise((r) => (releaseA = r)); }, // body hangs past the TTL
+  });
+  schedB.register('scan.postings', {
+    intervalMs: I,
+    run: async () => { ranByB += 1; await new Promise((r) => (releaseB = r)); },
+  });
+
+  // A claims window T0 with its body in flight; the clock passes A's lease expiry. A is alive — slow.
+  const pa = schedA.tick('scan.postings'); // not awaited: body pending
+  clock = T0 + 11; // past A's expiry (T0 + 10)
+
+  // B takes over while A still lives and its own body hangs too: expiry did not prove death.
+  const pb = schedB.tick('scan.postings');
+  let row = rowsFor(db, 'scan.postings')[0];
+  assert.equal(row.status, 'running');
+  assert.equal(row.lease_owner, 'u-b', 'the replacement holds the lease');
+  assert.equal(row.lease_epoch, 2, 'takeover bumped the fencing epoch');
+
+  // A's body completes late: its terminal write CASes against (owner u-a, epoch 1) — refused.
+  releaseA();
+  const outA = await pa;
+  assert.equal(outA.length, 1);
+  assert.equal(outA[0].status, 'superseded', 'the stale outcome comes back superseded, never recorded');
+  row = rowsFor(db, 'scan.postings')[0];
+  assert.equal(row.status, 'running', 'A finishing late did NOT mark the row done while B is in flight');
+  assert.equal(row.lease_owner, 'u-b');
+
+  // Only B's outcome is authoritative: it completes second and owns the done state.
+  releaseB();
+  const outB = await pb;
+  assert.equal(outB.length, 1);
+  assert.equal(outB[0].status, 'done');
+  row = rowsFor(db, 'scan.postings')[0];
+  assert.equal(row.status, 'done', "the replacement's outcome is the one recorded");
+  assert.equal(row.lease_owner, 'u-b');
+
+  // The honest guarantee: BOTH bodies ran — fencing fences STATE, not execution; effect dedup is act()'s job.
+  assert.equal(ranByA, 1);
+  assert.equal(ranByB, 1);
+});
+
+test('a stale holder failing late cannot write failed over its replacement — symmetric refusal', async () => {
+  const db = freshDb();
+  insertUsers(db, 'u-a', 'u-b');
+  let clock = T0;
+  let rejectA;
+
+  const schedA = createScheduler(db, { owner: 'u-a', leaseTtlMs: 10, now: () => clock });
+  const schedB = createScheduler(db, { owner: 'u-b', leaseTtlMs: 10, now: () => clock });
+  schedA.register('scan.postings', {
+    intervalMs: I,
+    run: async () => { await new Promise((_, rej) => (rejectA = rej)); }, // hangs, then throws late
+  });
+  schedB.register('scan.postings', { intervalMs: I, run: async () => {} }); // fast body
+
+  const pa = schedA.tick('scan.postings'); // A's body in flight past the TTL
+  clock = T0 + 11;
+  const outB = await schedB.tick('scan.postings'); // B takes over and finishes cleanly first
+  assert.equal(outB.length, 1);
+  assert.equal(outB[0].status, 'done');
+
+  // A then fails LATE: its terminal write must not record failed over the replacement's done.
+  rejectA(new Error('late crash from a superseded holder'));
+  const outA = await pa;
+  assert.equal(outA.length, 1);
+  assert.equal(outA[0].status, 'superseded');
+  assert.match(outA[0].error, /late crash/, 'the stale error rides back for logging even though unrecorded');
+
+  const row = rowsFor(db, 'scan.postings')[0];
+  assert.equal(row.status, 'done', "B's outcome survived A's late failure");
+  assert.equal(row.lease_owner, 'u-b');
+});
+
 test('concurrent runners partition windows by INSERT race — every window runs exactly once', async () => {
   const db = freshDb();
   insertUsers(db, 'u-a', 'u-b');
