@@ -313,15 +313,28 @@ test('dispatcher killed mid-drain in a REAL process: effect durable pre-ack, re-
   const dispatcherFile = path.join(dir, 'dispatcher.mjs');
   fs.writeFileSync(dispatcherFile, CHILD_DISPATCHER);
   const srcDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
-  const child = spawn(process.execPath, [dispatcherFile, srcDir, file, recvFile, markerFile], { stdio: 'ignore' });
-  const exited = new Promise((res) => { child.once('exit', () => res(true)); setTimeout(() => res(false), 15000); });
+  child = spawn(process.execPath, [dispatcherFile, srcDir, file, recvFile, markerFile], { stdio: 'ignore' });
+  let exitInfo = null; // filled on exit — must be filled BY the kill below, not before it
+  const exited = new Promise((res) => {
+    child.once('exit', (code, signal) => res({ code, signal }));
+    setTimeout(() => res(null), 15000);
+  });
   const deadline = Date.now() + 20000;
   while (!fs.existsSync(markerFile)) {
     if (Date.now() > deadline) throw new Error('child never reached the effect→ack gap');
     await new Promise((r) => setTimeout(r, 50));
   }
-  child.kill(); // hard kill on this platform — no cleanup handlers run in the child
-  assert.ok(await exited, 'the dispatcher process is gone');
+  assert.equal(exitInfo, null,
+    'the dispatcher is still alive when its first effect goes durable — no self-exit before the kill');
+  const killed = child.kill('SIGKILL'); // hard kill on this platform — no cleanup handlers run in the child
+  assert.ok(killed, 'kill reached a live process (not a no-op against an already-dead one)');
+  exitInfo = await exited;
+  assert.ok(exitInfo, 'the dispatcher process is gone after the kill');
+  // Node reports an explicit-signal kill as (null, signal) on every platform —
+  // verified empirically here on win32/Node v24.16.0: kill('SIGKILL') → code=null,
+  // signal='SIGKILL'. So the hard-kill receipt is identical cross-platform.
+  assert.equal(exitInfo.signal, 'SIGKILL', 'the dispatcher died of our SIGKILL — not a self-exit or another cause');
+  assert.equal(exitInfo.code, null);
 
   // The crash left exactly the at-least-once state: row 1's effect durable, zero stamps.
   db = openDb(file);
