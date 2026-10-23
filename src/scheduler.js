@@ -65,21 +65,24 @@ export function createScheduler(db, { owner = null, leaseTtlMs = 60_000, now = (
     return { runId, epoch: 1 };
   }
 
-  /**
+   /**
    * Take over one lapsed window: the previous holder died mid-run (or never set an expiry), or
    * it is merely slow past its TTL and still alive — expiry does not prove death. Either way this
    * acquisition bumps the fencing epoch (+1) and re-stamps a fresh expiry atomically; if another
-   * runner beat us to it, the WHERE clause updates nothing and we return null. The new epoch is
-   * read back so the holder carries it into its terminal write (see finishRun).
+   * runner beat us to it, the WHERE clause updates nothing and we return null.
+   *
+   * The new epoch is captured IN THE SAME STATEMENT (UPDATE ... RETURNING), not read back after:
+   * this acquisition must carry exactly the epoch its own bump wrote. A separate SELECT between
+   * the two would let a later same-owner takeover's bump leak in — holding an epoch we did not
+   * write, whose CAS then matches while the true current holder is still in flight.
    */
   function takeOverWindow(runId) {
-    const info = db.prepare(
+    const row = db.prepare(
       `UPDATE job_runs SET lease_owner = ?, lease_expires_at = ?, lease_epoch = lease_epoch + 1
-       WHERE id = ? AND status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= ?)`
-    ).run(owner, now() + leaseTtlMs, runId, now());
-    if (info.changes !== 1) return null;
-    const epoch = db.prepare(`SELECT lease_epoch FROM job_runs WHERE id = ?`).get(runId).lease_epoch;
-    return { runId, epoch };
+       WHERE id = ? AND status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+       RETURNING id, lease_epoch`
+    ).get(owner, now() + leaseTtlMs, runId, now());
+    return row ? { runId: row.id, epoch: row.lease_epoch } : null;
   }
 
   /** Lapsed rows for one job_key, oldest first — the make-up queue a killed runner leaves behind. */

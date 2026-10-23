@@ -4,6 +4,8 @@
 //   * lapsed-lease takeover by another runner for a killed holder — once, with the lease
 //     re-stamped to the new owner;
 //   * concurrent runners partition windows by INSERT race (the unique index is the arbiter);
+//   * a same-owner takeover landing right after our own bump cannot leak in its epoch — an
+//     acquisition carries only the epoch its own UPDATE wrote;
 //   * a failing body lands as status='failed', readable, and its window is never re-queued.
 // All timing goes through createScheduler's injectable `now`, so every test is deterministic.
 
@@ -234,6 +236,86 @@ test('a stale holder failing late cannot write failed over its replacement — s
   const row = rowsFor(db, 'scan.postings')[0];
   assert.equal(row.status, 'done', "B's outcome survived A's late failure");
   assert.equal(row.lease_owner, 'u-b');
+});
+
+test('same-owner takeover interleaved at the statement boundary — an acquisition carries only the epoch its own UPDATE wrote', async () => {
+  const db = freshDb();
+  insertUsers(db, 'u-a', 'u-b');
+  let clock = T0;
+
+  // Three live holders on one window: A (u-a) claims and stalls past TTL; B1 takes over; then —
+  // inside the statement boundary of B1's own takeover bump — B2 (same owner u-b) finds B1's
+  // fresh lease already lapsed and takes over again. With a separate-SELECT epoch capture, B1
+  // would read back epoch 3 (B2's bump), later finish authoritatively while the true current
+  // holder is still in flight, and supersede it when ITS outcome lands.
+  let releaseA, releaseB1, releaseB2;
+  const schedA = createScheduler(db, { owner: 'u-a', leaseTtlMs: 10, now: () => clock });
+  const schedB1 = createScheduler(db, { owner: 'u-b', leaseTtlMs: 10, now: () => clock });
+  const schedB2 = createScheduler(db, { owner: 'u-b', leaseTtlMs: 10, now: () => clock });
+  schedA.register('scan.postings', {
+    intervalMs: I,
+    run: async () => { await new Promise((res) => (releaseA = res)); }, // hangs past the TTL
+  });
+  schedB1.register('scan.postings', {
+    intervalMs: I,
+    run: async () => { await new Promise((res) => (releaseB1 = res)); },
+  });
+  schedB2.register('scan.postings', {
+    intervalMs: I,
+    run: async () => { await new Promise((res) => (releaseB2 = res)); },
+  });
+
+  const pa = schedA.tick('scan.postings'); // A claims W(T0), epoch 1; body in flight past the TTL
+  clock = T0 + 61; // lapsed for B1 (expiry was T0+10)
+
+  let injected = false;
+  let pb2;
+  const realPrepare = db.prepare.bind(db);
+  db.prepare = (sql) => {
+    const stmt = realPrepare(sql);
+    if (!injected && typeof sql === 'string' && sql.includes('lease_epoch + 1')) {
+      const realGet = stmt.get.bind(stmt);
+      stmt.get = (...args) => {
+        const row = realGet(...args); // B1's bump lands atomically — it wrote epoch 2
+        if (!injected) {
+          injected = true;
+          clock = T0 + 80; // past B1's re-stamped expiry (T0+71), before the next window is due
+          pb2 = schedB2.tick('scan.postings'); // takes over again → epoch 3; body gated pending
+        }
+        return row; // ...and B1 still carries exactly what its own statement wrote
+      };
+    }
+    return stmt;
+  };
+
+  const pb1 = schedB1.tick('scan.postings'); // takeover lands with the interleave inside it
+  let row = rowsFor(db, 'scan.postings')[0];
+  assert.equal(row.lease_epoch, 3, 'both takeovers landed before anyone finished');
+  assert.equal(row.status, 'running');
+
+  // B1's late outcome must NOT be authoritative: it holds epoch 2 while the row is at epoch 3.
+  releaseB1();
+  const outB1 = await pb1;
+  assert.equal(outB1.length, 1);
+  assert.equal(outB1[0].status, 'superseded', "an acquisition that did not write the current epoch cannot finish");
+  row = rowsFor(db, 'scan.postings')[0];
+  assert.equal(row.status, 'running', 'B1 finishing late left the current holder row untouched');
+  assert.equal(row.lease_owner, 'u-b');
+
+  // A's stale outcome is refused too — wrong owner AND epoch.
+  releaseA();
+  const outA = await pa;
+  assert.equal(outA[0].status, 'superseded');
+
+  // Only B2 — the true current holder — can move the row out of running.
+  releaseB2();
+  const outB2 = await pb2;
+  assert.equal(outB2.length, 1);
+  assert.equal(outB2[0].status, 'done');
+  row = rowsFor(db, 'scan.postings')[0];
+  assert.equal(row.status, "done", "the current holder's outcome is the one recorded");
+  assert.equal(row.lease_owner, 'u-b');
+  assert.equal(row.lease_epoch, 3);
 });
 
 test('default owner (NULL) completing records done on its own row — null-safe terminal write', async () => {
