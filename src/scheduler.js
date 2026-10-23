@@ -5,8 +5,10 @@
 // instant agree on the exact same due_ms value — across restarts and across processes. The
 // database decides who runs it: claiming is an INSERT under the unique index uq_job_runs_window
 // (job_key, due_ms), so a window can never be claimed twice no matter how many runners race or
-// how often they restart. Downtime therefore produces exactly one make-up run per missed
-// window — never zero (wedged), never two (double execution):
+// how often they restart. Downtime therefore produces one make-up run per missed
+// window — never zero (wedged); if a holder dies or stalls, the next acquisition takes over and
+// re-runs it: fencing guarantees exactly one authoritative outcome per window, not that bodies
+// can only ever execute once:
 //   * the high-water mark is MAX(due_ms) over ALL rows for the job_key, so windows skipped while
 //     we were down are each claimed in order on the next tick; a job seen for the first time
 //     anchors at the CURRENT window and never reaches into the past;
@@ -45,8 +47,9 @@ export function createScheduler(db, { owner = null, leaseTtlMs = 60_000, now = (
   /**
    * Claim one window: INSERT under the unique index. Returns `{ runId, epoch }` on success — a
    * fresh claim always carries epoch 1 (the column default) — and null when the database says
-   * another runner already owns or handled this (job_key, due_ms). This is the exactly-once gate:
-   * no in-memory bookkeeping can double a window.
+   * another runner already owns or handled this (job_key, due_ms). The unique index makes each
+   * window claimable once — a guarantee about claims, not executions: takeover re-runs bodies,
+   * and deduping their effects is the act() boundary's job.
    */
   function claimWindow(jobKey, dueMs) {
     const runId = randomUUID();
@@ -97,13 +100,15 @@ export function createScheduler(db, { owner = null, leaseTtlMs = 60_000, now = (
    * Terminal write with fencing: compare-and-set on owner AND epoch while the row is still
    * 'running'. Only the current lease holder can move a window out of running; a stale holder's
    * late outcome updates nothing and comes back as status:'superseded' (its error preserved for
-   * logging), never recorded.
+   * logging), never recorded. The owner comparison is null-safe: the default owner IS NULL, and
+   * SQL equality never matches it — so the default holder must still be able to finish its own row.
    */
   function finishRun(acq, jobKey, dueMs, status, error) {
     const info = db.prepare(
       `UPDATE job_runs SET status = ?, finished_at = ?
-       WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_epoch = ?`
-    ).run(status, now(), acq.runId, owner, acq.epoch);
+       WHERE id = ? AND status = 'running' AND lease_epoch = ?
+         AND ((lease_owner IS NULL AND ? IS NULL) OR (lease_owner = ?))`
+    ).run(status, now(), acq.runId, acq.epoch, owner, owner);
     if (info.changes !== 1) return { runId: acq.runId, jobKey, dueMs, status: 'superseded', error };
     return { runId: acq.runId, jobKey, dueMs, status, ...(error ? { error } : {}) };
   }
@@ -127,7 +132,8 @@ export function createScheduler(db, { owner = null, leaseTtlMs = 60_000, now = (
    * One scheduler pass for one registered job, at time t (defaults to now()):
    *   1. take over every lapsed window first — a killed runner's make-up runs, oldest first,
    *      each re-executed against ITS OWN due_ms read from the row;
-   *   2. claim and run each window due after the high-water mark up to t — exactly-once catch-up;
+   *   2. claim and run each window due after the high-water mark up to t — one authoritative
+   *      outcome per missed window (fencing decides which holder's late write counts);
    *   3. windows already claimed (by us or anyone) are never touched again: the unique index is
    *      the only arbiter, so concurrent runners partition the same candidate list by INSERT race.
    * Returns one entry per window this tick actually ran.

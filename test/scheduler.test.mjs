@@ -236,6 +236,75 @@ test('a stale holder failing late cannot write failed over its replacement — s
   assert.equal(row.lease_owner, 'u-b');
 });
 
+test('default owner (NULL) completing records done on its own row — null-safe terminal write', async () => {
+  const db = freshDb(); // no users needed: a NULL holder does not reference one
+  let calls = 0;
+  let clock = T0;
+  const sched = createScheduler(db, { leaseTtlMs: 5_000, now: () => clock }); // owner omitted → NULL holder
+  sched.register('scan.postings', { intervalMs: I, run: async () => { calls += 1; } });
+
+  const out = await sched.tick('scan.postings');
+  assert.equal(out.length, 1);
+  assert.deepEqual({ dueMs: out[0].dueMs, status: out[0].status }, { dueMs: T0, status: 'done' });
+  assert.equal(calls, 1);
+
+  const row = rowsFor(db, 'scan.postings')[0];
+  assert.equal(row.status, 'done', "the default holder's terminal write matched its own NULL-owned row");
+  assert.strictEqual(row.lease_owner, null, 'holder stays the default (NULL) owner');
+});
+
+test('default owner (NULL) failing lands a readable failed row — null-safe on the failure path too', async () => {
+  const db = freshDb();
+  let clock = T0;
+  const sched = createScheduler(db, { leaseTtlMs: 5_000, now: () => clock }); // owner omitted → NULL holder
+  sched.register('scan.postings', { intervalMs: I, run: async () => { throw new Error('default-holder boom'); } });
+
+  const out = await sched.tick('scan.postings');
+  assert.equal(out.length, 1);
+  assert.deepEqual({ status: out[0].status }, { status: 'failed' });
+  assert.match(out[0].error, /default-holder boom/);
+
+  const row = rowsFor(db, 'scan.postings')[0];
+  assert.equal(row.status, 'failed');
+  assert.ok(row.finished_at > T0 - 1, 'failure is readable with a finished stamp');
+  assert.strictEqual(row.lease_owner, null, 'holder stays the default (NULL) owner');
+
+  // And the failed window itself is never re-queued: at the next boundary only the NEW window runs.
+  clock = T0 + I;
+  const out2 = await sched.tick('scan.postings');
+  assert.deepEqual(out2.map((r) => r.dueMs), [T0 + I], 'only the new window — the failed one is not re-run');
+});
+
+test('a lapsed NULL-owned window is taken over by a named runner — the stale default holder cannot write over it', async () => {
+  const db = freshDb();
+  insertUsers(db, 'u-b');
+  let clock = T0;
+  let releaseA;
+
+  const schedA = createScheduler(db, { leaseTtlMs: 10, now: () => clock }); // owner omitted → NULL holder
+  schedA.register('scan.postings', { intervalMs: I, run: async () => { await new Promise((res) => (releaseA = res)); } });
+
+  const pa = schedA.tick('scan.postings'); // A claims T0 and hangs past its TTL
+  clock = T0 + 11;
+  let bRuns = 0;
+  const schedB = createScheduler(db, { owner: 'u-b', leaseTtlMs: 5_000, now: () => clock });
+  schedB.register('scan.postings', { intervalMs: I, run: async () => { bRuns += 1; } });
+
+  const outB = await schedB.tick('scan.postings'); // B takes over the lapsed window and finishes it first
+  assert.equal(outB.length, 1);
+  assert.deepEqual({ status: outB[0].status }, { status: 'done' });
+  assert.equal(bRuns, 1);
+
+  releaseA(); // A's body now resolves — its terminal write must be refused
+  const outA = await pa;
+  assert.equal(outA.length, 1);
+  assert.equal(outA[0].status, 'superseded', "the stale NULL holder can't record over the named replacement");
+
+  const row = rowsFor(db, 'scan.postings')[0];
+  assert.equal(row.status, 'done', "B's outcome survived A's late success");
+  assert.equal(row.lease_owner, 'u-b');
+});
+
 test('concurrent runners partition windows by INSERT race — every window runs exactly once', async () => {
   const db = freshDb();
   insertUsers(db, 'u-a', 'u-b');
