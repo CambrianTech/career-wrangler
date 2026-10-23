@@ -250,8 +250,10 @@ test('a delivery that never resolves stamps nothing until it does', async (t) =>
 // The child process for the real kill/restart regression below: a REAL dispatcher
 // draining the sender's outbox into the receiver DB through act() — exactly what
 // production wiring does. After row 1's effect is durable but its ack (dispatched_at)
-// has not landed, it writes a marker and hangs forever; the parent hard-kills inside
-// that gap, so no cleanup handlers run in the child.
+// has not landed, it writes a marker and holds a referenced event-loop handle while
+// hanging — so Node cannot exit on its own (an early self-exit would make the parent's
+// kill a no-op and this test a false positive). The parent hard-kills inside that gap,
+// so no cleanup handlers run in the child.
 const CHILD_DISPATCHER = String.raw`
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -275,7 +277,8 @@ await drainOutbox(db, {
     });
     if (row.seq === 1) {
       fs.writeFileSync(markerFile, String(process.pid)); // effect durable; ack not stamped — the at-least-once gap
-      await new Promise(() => {}); // hang until killed: the parent kills here, nothing cleans up
+      const keepAlive = setInterval(() => {}, 60_000); // referenced event-loop handle: node stays alive until killed
+      await new Promise(() => {}); // never resolves; keepAlive holds the loop so node cannot exit on its own
     }
   },
 });
@@ -288,7 +291,8 @@ test('dispatcher killed mid-drain in a REAL process: effect durable pre-ack, re-
   const file = path.join(dir, 'career.sqlite');
   const recvFile = path.join(dir, 'receiver.sqlite');
   const markerFile = path.join(dir, 'effect-1-durable.txt');
-  t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+  let child = null; // hoisted: the after-hook kills a survivor if an assertion fails mid-kill
+  t.after(() => { if (child) { try { child.kill(); } catch {} /* already dead */ } fs.rmSync(dir, { recursive: true, force: true }); });
 
   // Sender: three acts announcing to room/tracker. Receiver DB: the dedupe boundary (act()).
   let db = openDb(file);
