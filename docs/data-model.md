@@ -64,7 +64,7 @@ Durable messages to airc, written in the SAME TRANSACTION as the state change th
 
 ### job_runs
 The scheduler's memory — what ran when, and whether a missed window was already caught up.
-`id`, `job_key text` (`scan.postings`, `followups.due`, …), `due_ms bigint`, `started_at`, `finished_at nullable`, `status` = running | done | failed, `lease_owner user_id nullable`, `lease_expires_at timestamptz nullable` (a lapsed lease lets another runner take over the window → invariant 5), `request_id → action_log.id`. The unique key on (job_key, due_ms) lives in the table itself, enforced by the database.
+`id`, `job_key text` (`scan.postings`, `followups.due`, …), `due_ms bigint`, `started_at`, `finished_at nullable`, `status` = running | done | failed, `lease_owner user_id nullable`, `lease_expires_at timestamptz nullable` (a lapsed lease lets another runner take over the window → invariant 5), `lease_epoch int not null default 1` (fencing token: 1 on claim, +1 per takeover — terminal writes compare-and-set against owner AND epoch while the row is still running → invariant 5), `request_id → action_log.id`. The unique key on (job_key, due_ms) lives in the table itself, enforced by the database.
 
 ### outcome_events
 Delayed, confounded signals from the world (README → Learning).
