@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { openDb, fkPragmaOn } from '../src/db.js';
 import { applyMigrations } from '../src/migrate.js';
 import {
-  openGate, completeGate, recoverInFlight,
+  openGate, completeGate, recoverInFlight, drainGateHandlers, GATE_HANDLER_DESTINATION,
   registerGateHandler, setGateHandler, resolveGateHandler, gateHandlerNames,
   NotFoundError, GateNotOpenError, CrossOwnerError, BadGateInputError,
 } from '../src/gates.js';
@@ -252,4 +252,90 @@ test('recoverInFlight lands a recovery.checked marker when another path already 
   const r2 = recoverInFlight(db);
   assert.equal(r2.checked, 0);
   assert.equal(r2.opened.length, 0);
+});
+
+// --- handler delivery: the resolved handler is invoked, not merely reported (send-back finding 2) ----
+
+test('opening a gate announces it on the outbox; drain invokes the selected handler exactly once', async (t) => {
+  const db = freshDb(t);
+  seedSubmission(db, {}); // owner u-a
+  const subId = db.prepare(`SELECT id FROM submissions ORDER BY created_at DESC LIMIT 1`).get().id;
+
+  let calls = [];
+  registerGateHandler('spy-deliver', async ({ gate }) => { calls.push(gate); });
+  setGateHandler(db, { ownerId: 'u-a', kind: 'captcha', handler: 'spy-deliver' });
+
+  const r1 = openGate(db, { actor: 'u-a', requestId: 'open-spy-1', submissionId: subId, kind: 'captcha', ask: 'Solve it.' });
+  assert.equal(r1.opened, true);
+
+  // The announcement landed atomically with the open — one pending row carrying what a drainer needs.
+  const rows = db.prepare(`SELECT * FROM outbox WHERE destination = ? AND dispatched_at IS NULL`).all(GATE_HANDLER_DESTINATION);
+  assert.equal(rows.length, 1);
+  const payload = JSON.parse(rows[0].payload);
+  assert.equal(payload.gateId, r1.gate.id);
+  assert.equal(payload.submissionId, subId);
+  assert.equal(payload.ownerId, 'u-a');
+  assert.equal(payload.kind, 'captcha');
+
+  const d1 = await drainGateHandlers(db);
+  assert.equal(d1.delivered, 1);
+  assert.equal(calls.length, 1, 'the selected handler was INVOKED — resolution alone was the old hole');
+  assert.equal(calls[0].id, r1.gate.id);
+  assert.equal(calls[0].kind, 'captcha');
+
+  // Redelivery with a fresh key: an open gate already sits there → no second announcement.
+  const r2 = openGate(db, { actor: 'u-a', requestId: 'open-spy-2', submissionId: subId, kind: 'login', ask: 'Log in.' });
+  assert.equal(r2.duplicate, true);
+  const total = db.prepare(`SELECT COUNT(*) c FROM outbox WHERE destination = ? AND payload LIKE '%' || ? || '%'`)
+    .get(GATE_HANDLER_DESTINATION, r1.gate.id).c;
+  assert.equal(total, 1, 'spent exactly once by success — the duplicate announces nothing');
+});
+
+test('a rejecting handler leaves its delivery pending; re-drain invokes exactly once more', async (t) => {
+  const db = freshDb(t);
+  seedSubmission(db, {});
+  const subId = db.prepare(`SELECT id FROM submissions ORDER BY created_at DESC LIMIT 1`).get().id;
+
+  let calls = 0;
+  registerGateHandler('flaky-deliver', async () => { calls += 1; throw new Error('handler exploded'); });
+  setGateHandler(db, { ownerId: 'u-a', kind: 'captcha', handler: 'flaky-deliver' });
+
+  const r1 = openGate(db, { actor: 'u-a', requestId: 'open-flaky-1', submissionId: subId, kind: 'captcha', ask: 'Solve it.' });
+  assert.equal(r1.opened, true);
+
+  await assert.rejects(() => drainGateHandlers(db), /handler exploded/);
+  assert.equal(calls, 1, 'first attempt invoked and rejected');
+  const pending = db.prepare(`SELECT COUNT(*) c FROM outbox WHERE destination = ? AND dispatched_at IS NULL`)
+    .get(GATE_HANDLER_DESTINATION).c;
+  assert.equal(pending, 1, 'rejection stops the drain — row stays pending for next time (slice-2 semantics)');
+
+  // Recovered: re-register a working handler under the same name and drain again.
+  registerGateHandler('flaky-deliver', async () => { calls += 1; });
+  const d2 = await drainGateHandlers(db);
+  assert.equal(d2.delivered, 1);
+  assert.equal(calls, 2, 're-drain invokes exactly once more — no lost delivery, no double effect');
+});
+
+test('a gate closed before delivery acks quietly without invoking its handler', async (t) => {
+  const db = freshDb(t);
+  seedSubmission(db, {});
+  const subId = db.prepare(`SELECT id FROM submissions ORDER BY created_at DESC LIMIT 1`).get().id;
+
+  let calls = 0;
+  registerGateHandler('quiet-deliver', async () => { calls += 1; });
+  setGateHandler(db, { ownerId: 'u-a', kind: 'captcha', handler: 'quiet-deliver' });
+
+  const r1 = openGate(db, { actor: 'u-a', requestId: 'open-quiet-1', submissionId: subId, kind: 'captcha', ask: 'Solve it.' });
+  assert.equal(r1.opened, true);
+
+  // The person acts before the drainer runs — or a crash window closes over the announcement.
+  const c = completeGate(db, { actor: 'u-a', requestId: 'dec-quiet-1', gateId: r1.gate.id, decision: 'approve' });
+  assert.equal(c.duplicate, false);
+
+  const d1 = await drainGateHandlers(db);
+  assert.equal(d1.delivered, 1, 'the announcement still leaves — acked');
+  assert.equal(calls, 0, 'but the handler is never invoked: someone already acted on it');
+  const pending = db.prepare(`SELECT COUNT(*) c FROM outbox WHERE destination = ? AND dispatched_at IS NULL`)
+    .get(GATE_HANDLER_DESTINATION).c;
+  assert.equal(pending, 0);
 });

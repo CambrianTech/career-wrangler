@@ -205,3 +205,76 @@ test('cross-owner rows never reach the pinned pipeline (HTTP boundary)', async (
   const r = await post(base, '/api/gates/does-not-matter', { decision: 'approve', request_id: 'x' });
   assert.equal(r.status, 404);
 });
+
+// --- route robustness: rejections are answered inline, never escaped (send-back finding 3) ----
+
+test('malformed or empty bodies are client errors on both gate routes; the server keeps serving', async (t) => {
+  const base = await boot(t);
+  const raw = (urlPath, text) => fetch(`${base}${urlPath}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: text,
+  });
+
+  // Garbage JSON cannot reach the DB — refused as a client error before any act.
+  let r = await raw('/api/handlers', 'not-json{');
+  assert.equal(r.status, 400);
+  assert.match((await r.json()).error, /JSON/);
+  r = await raw(`/api/gates/${randomUUID()}`, '{broken');
+  assert.equal(r.status, 400);
+
+  // An empty body is a missing-field client error on both routes — not an act.
+  r = await raw('/api/handlers', '');
+  assert.equal(r.status, 400);
+  r = await raw(`/api/gates/${randomUUID()}`, '');
+  assert.equal(r.status, 400);
+
+  // And the server is still up and answering.
+  const h = await fetch(`${base}/api/health`);
+  assert.equal(h.status, 200);
+});
+
+test('a DB rejection on a gate route answers 500 inline; the server keeps serving', async (t) => {
+  // Own boot here so the test can reach the handle and close its connection: every
+  // subsequent DB call throws a non-GateError. Pre-fix that throw escaped the async
+  // route handler unanswered (unhandled rejection); now it is answered inline with a
+  // 500 and the process stays up.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-api-'));
+  const dbFile = path.join(dir, 't.sqlite');
+  const seed = openDb(dbFile);
+  applyMigrations(seed);
+  seed.prepare(`INSERT INTO users (id,name,kind,peer_id,created_at) VALUES ('u-a','A','human',NULL,0)`).run();
+  seed.close();
+  process.env.PORT = '0';
+  process.env.OWNER_ID = 'u-a';
+  delete process.env.HOST;
+  const h = await start({ dbFile });
+  t.after(() => {
+    try { h.server.close(); } catch {}
+    try { h.db.close(); } catch {}
+    fs.rmSync(dir, { recursive: true, force: true });
+    delete process.env.PORT;
+    delete process.env.OWNER_ID;
+  });
+  const base = `http://127.0.0.1:${h.addr.port}`;
+
+  h.db.close(); // from here on the DB rejects every call
+
+  let r = await fetch(`${base}/api/handlers`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ kind: 'captcha', handler: 'human' }),
+  });
+  assert.equal(r.status, 500, 'rejection answered inline — not escaped past the route');
+  assert.equal(typeof (await r.json()).error, 'string');
+
+  r = await fetch(`${base}/api/gates/${randomUUID()}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ decision: 'approve', request_id: 'http-dbdown-1' }),
+  });
+  assert.equal(r.status, 500);
+  assert.equal(typeof (await r.json()).error, 'string');
+
+  // The process survived both rejections: it still answers — with an error status,
+  // because its DB is gone — but it ANSWERS.
+  const h2 = await fetch(`${base}/api/health`);
+  assert.equal(h2.status, 500);
+  assert.equal(typeof (await h2.json()).error, 'string');
+});

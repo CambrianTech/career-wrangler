@@ -252,7 +252,7 @@ export async function drainGateHandlers(db, { limit = 100 } = {}) {
   return drainOutbox(db, {
     destination: GATE_HANDLER_DESTINATION,
     limit,
-    deliver(row) {
+    deliver: async (row) => {
       let payload;
       try { payload = JSON.parse(row.payload); } catch (err) {
         // This line is machine-written in-transaction; an unparseable row means data
