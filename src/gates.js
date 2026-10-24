@@ -14,13 +14,18 @@
 // a row naming an unregistered handler is refused at write time so a typo can never
 // silently unstaff a gate.
 // Handler delivery: opening a gate announces it on the outbox (destination
-// 'gate-handlers') in the SAME TRANSACTION as the open — deliver first, ack second,
-// exactly like every other outbound effect. A selected non-human handler is invoked by
-// drainGateHandlers; one that fails leaves its row pending and visible for the next
-// drain, and a gate closed before delivery acks quietly (the person already acted).
-
+// GATE_HANDLER_DESTINATION) in the SAME TRANSACTION as the open — deliver first, ack
+// second, exactly like every other outbound effect. drainGateHandlers invokes the
+// handler resolved for the gate's owner+kind; one that fails leaves its row pending
+// and visible for the next drain (a rejection stops this drain and never crashes boot),
+// and a gate closed before delivery acks quietly — the person already acted.
 import { randomUUID } from 'node:crypto';
-import { act } from './outbox.js';
+import { act, drainOutbox } from './outbox.js';
+
+// The outbox line handler deliveries ride on: one destination per effect kind keeps the
+// dispatcher's at-least-once semantics exact (slice 2) — a gate open announces here and
+// drainGateHandlers is its drainer.
+export const GATE_HANDLER_DESTINATION = 'gate-handlers';
 
 export const GATE_KINDS = ['captcha', 'login', '2fa', 'final_submit'];
 // Verbs whose effect crosses the world boundary — an in_flight row with one of these
@@ -95,14 +100,17 @@ export function openGate(db, { actor, requestId, submissionId, kind, ask }) {
   const existing = openGateOn(db, submissionId);
   if (existing) return { opened: false, duplicate: true, gate: existing };
 
-  let gateId;
+  const gateId = randomUUID(); // pre-generated: the delivery announcement needs it before act() commits
   const r = act(db, {
     actor, requestId, verb: 'gate.open', target: { kind: 'submission', id: submissionId },
     mutate(d) {
-      gateId = randomUUID();
       d.prepare(`INSERT INTO gate_actions (id, owner_id, submission_id, kind, ask, opened_at) VALUES (?, ?, ?, ?, ?, ?)`)
         .run(gateId, sub.owner_id, submissionId, kind, ask, Date.now());
     },
+    // Handler delivery rides the outbox (slice 2 discipline): announced in THIS transaction —
+    // commit or vanish together. A redelivered open returned above never reaches here,
+    // so it announces nothing: the announcement is spent exactly once, by success.
+    announce: [{ destination: GATE_HANDLER_DESTINATION, payload: { gateId, submissionId, ownerId: sub.owner_id, kind } }],
   });
   if (r.duplicate) { // same key already landed: hand back what the world holds now
     return { opened: false, duplicate: true, gate: openGateOn(db, submissionId) ?? null };
@@ -230,4 +238,31 @@ export function recoverInFlight(db, { limit = 50 } = {}) {
     }
   }
   return { checked: rows.length, opened, skipped };
+}
+
+// --- handler delivery ---------------------------------------------------------------
+// The dispatch side of the opt-in: drain the 'gate-handlers' outbox line and invoke
+// whoever resolves for each announced gate's owner+kind. Reuses drainOutbox exactly —
+// deliver first, ack second; a rejecting handler stops THIS drain and leaves its row
+// pending for the next one (real retry), which is why boot catches the rejection instead
+// of crashing on it. A gate closed before delivery acks quietly: the person already
+// acted, so delivery is a no-op that just stamps. The 'human' handler is a no-op by
+// definition — the person at the tracker page IS its delivery.
+export async function drainGateHandlers(db, { limit = 100 } = {}) {
+  return drainOutbox(db, {
+    destination: GATE_HANDLER_DESTINATION,
+    limit,
+    deliver(row) {
+      let payload;
+      try { payload = JSON.parse(row.payload); } catch (err) {
+        // This line is machine-written in-transaction; an unparseable row means data
+        // corruption, and acking it quietly would silently unstaff every later delivery.
+        throw new Error(`gate-handler outbox row ${row.id} carries no parseable payload: ${err.message}`);
+      }
+      const gate = db.prepare('SELECT * FROM gate_actions WHERE id = ?').get(payload.gateId);
+      if (!gate || gate.closed_at !== null && gate.closed_at !== undefined) return; // closed → quiet ack
+      const name = resolveGateHandler(db, { ownerId: gate.owner_id, kind: gate.kind });
+      await handlers.get(name)({ db, gate }); // 'human' resolves to its no-op by construction
+    },
+  });
 }

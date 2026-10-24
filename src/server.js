@@ -24,6 +24,7 @@ import { applyMigrations } from './migrate.js';
 import {
   completeGate,
   recoverInFlight,
+  drainGateHandlers,
   setGateHandler,
   resolveGateHandler,
   gateHandlerNames,
@@ -72,10 +73,18 @@ export function makeTrackerStatements(db, owner) {
   };
 }
 
-export function start({ dbFile = DB_FILE, autoMigrate = true, recover = true } = {}) {
+export async function start({ dbFile = DB_FILE, autoMigrate = true, recover = true } = {}) {
   const db = openDb(dbFile);
   if (autoMigrate) applyMigrations(db); // idempotent; migration_log guards re-runs
-  if (recover) recoverInFlight(db); // slice 4: an in_flight external-effect act opens a gate, never blind-resends
+  if (recover) {
+    recoverInFlight(db); // slice 4: an in_flight external-effect act opens a gate, never blind-resends
+    // Deliver the handler announcements recovery just landed. A rejecting handler stops THIS
+    // drain and leaves its row pending for the next one — boot logs and continues instead of
+    // crashing on it (slice-2 outbox discipline; the tracker page stays staffed either way).
+    await drainGateHandlers(db).catch((err) => {
+      console.error(`career-wrangler: gate-handler delivery stopped early (${err.message}); its row stays pending for the next drain`);
+    });
+  }
   const owner = resolvePinnedOwner(db); // throws with a named-owner error on an unpinned multi-owner DB
   const t = makeTrackerStatements(db, owner);
 
@@ -157,7 +166,8 @@ async function handleSetHandler(req, res, db, owner) {
     setGateHandler(db, { ownerId: owner.id, kind: body.kind, handler: body.handler });
   } catch (err) {
     if (err instanceof GateError) return sendJson(res, { error: err.message }, err.status);
-    throw err;
+    // An async handler's rejection cannot reach the outer synchronous catch — answer here:
+    return sendJson(res, { error: err.message || 'internal error' }, 500);
   }
   return sendJson(res, handlersPayload(db, owner));
 }
@@ -178,7 +188,8 @@ async function handleGateDecision(req, res, db, owner, gateId) {
     return sendJson(res, r);
   } catch (err) {
     if (err instanceof GateError) return sendJson(res, { error: err.message }, err.status);
-    throw err; // outer catch → 500 with message
+    // An async handler's rejection cannot reach the outer synchronous catch — answer here:
+    return sendJson(res, { error: err.message || 'internal error' }, 500);
   }
 }
 
