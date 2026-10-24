@@ -6,11 +6,18 @@
 //   completeGate    approve / resend / close, each landed as an act under the caller's
 //                   idempotency key (invariant 2), atomically with the state it implies
 //   recoverInFlight in_flight external-effect acts OPEN A GATE — they are never blindly
-//                   re-executed (invariant 3); recovery is idempotent by construction
+//                   re-executed (invariant 3); recovery is idempotent by construction and
+//                   BOUNDED: every row it handles leaves a progress marker behind, so the
+//                   window advances across restarts instead of re-selecting the same batch
 // Handler policy: which handler serves each gate kind per owner. The opt-in is DATA
 // (gate_handlers, migration 020), not code: 'human' is the default and always staffed;
 // a row naming an unregistered handler is refused at write time so a typo can never
 // silently unstaff a gate.
+// Handler delivery: opening a gate announces it on the outbox (destination
+// 'gate-handlers') in the SAME TRANSACTION as the open — deliver first, ack second,
+// exactly like every other outbound effect. A selected non-human handler is invoked by
+// drainGateHandlers; one that fails leaves its row pending and visible for the next
+// drain, and a gate closed before delivery acks quietly (the person already acted).
 
 import { randomUUID } from 'node:crypto';
 import { act } from './outbox.js';
@@ -172,17 +179,38 @@ export function completeGate(db, { actor, requestId, gateId, decision }) {
 // the request key is stable per action row, and openGate already returns any existing
 // open gate without consuming a key (invariant 1).
 export function recoverInFlight(db, { limit = 50 } = {}) {
+  // Bounded traversal with progress. The window admits only rows that still need a
+  // gate: an external-effect verb with a resolvable submission target, on a submission
+// that has not already been decided (submitted/closed), with no open gate covering the
+// send and no recovery marker under this row's stable key. Every row handled below
+// leaves such a marker behind — the gate.open act itself carries request_id
+// recover-<action_id>, and a row whose send another path already gates gets an explicit
+// 'recovery.checked' — so each pass advances the window: a backlog larger than one limit
+// is fully traversed across successive startups instead of starving its tail forever.
+  const verbs = [...EXTERNAL_EFFECT_VERBS];
+  // json_extract on malformed JSON throws in SQLite, so extraction happens only behind
+  // json_valid (the CASE guards the join key; rows that reach WHERE already matched it,
+  // hence their target is valid by construction).
   const rows = db.prepare(
-    `SELECT * FROM action_log WHERE outcome = 'in_flight' ORDER BY intent_at LIMIT ?`
-  ).all(limit);
+    `SELECT al.* FROM action_log al
+     JOIN submissions s ON s.id = CASE WHEN json_valid(al.target) THEN json_extract(al.target, '$.id') END
+     WHERE al.outcome = 'in_flight'
+       AND al.verb IN (${verbs.map(() => '?').join(', ')})
+       AND json_valid(al.target)
+       AND json_extract(al.target, '$.kind') = 'submission'
+       AND s.status NOT IN ('submitted', 'closed')
+       AND NOT EXISTS (SELECT 1 FROM action_log r WHERE r.request_id = 'recover-' || al.id)
+       AND NOT EXISTS (SELECT 1 FROM gate_actions g WHERE g.submission_id = s.id AND g.closed_at IS NULL)
+     ORDER BY al.intent_at ASC, al.id ASC
+     LIMIT ?`
+  ).all(...verbs, limit);
   const opened = [];
   const skipped = [];
   for (const row of rows) {
-    if (!EXTERNAL_EFFECT_VERBS.has(row.verb)) continue; // no external effect: nothing to gate
-    let t; try { t = JSON.parse(row.target); } catch { continue; }
-    if (!t || t.kind !== 'submission' || !t.id) { skipped.push({ actionId: row.id, reason: 'unrecognized target' }); continue; }
+    let t; try { t = JSON.parse(row.target); } catch { continue; } // SQL validated this; defense in depth
+    if (!t || typeof t.id !== 'string') { skipped.push({ actionId: row.id, reason: 'unrecognized target' }); continue; }
     const sub = db.prepare('SELECT id, owner_id FROM submissions WHERE id = ?').get(t.id);
-    if (!sub) { skipped.push({ actionId: row.id, reason: 'submission missing' }); continue; }
+    if (!sub) { skipped.push({ actionId: row.id, reason: 'submission missing' }); continue; } // JOIN guarantees it; data outlives code
     // actor is the pinned owner — the person at the tracker page (human by default).
     const r = openGate(db, {
       actor: sub.owner_id,
@@ -191,7 +219,15 @@ export function recoverInFlight(db, { limit = 50 } = {}) {
       kind: 'final_submit',
       ask: 'An external send may have left the building — confirm on the site, then resend or close.',
     });
-    if (r.opened) opened.push(r.gate); else skipped.push({ actionId: row.id, reason: 'gate already open' });
+    if (r.opened) {
+      // The gate.open act above IS this row's progress marker (key recover-<action_id>).
+      opened.push(r.gate);
+    } else {
+      // A gate already covers this send through another path: land an explicit marker so
+      // the row stops re-entering the window every startup and starving rows behind it.
+      act(db, { actor: sub.owner_id, requestId: `recover-${row.id}`, verb: 'recovery.checked', target: { kind: 'action_log', id: row.id } });
+      skipped.push({ actionId: row.id, reason: 'gate already open' });
+    }
   }
   return { checked: rows.length, opened, skipped };
 }

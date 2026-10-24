@@ -35,7 +35,7 @@ function seedSubmission(db, { id = randomUUID(), owner = 'u-a', status = 'waitin
     db.prepare(`INSERT INTO users (id,name,kind,created_at) VALUES (?, ?, 'human', 0)`).run(owner, owner);
   const pid = randomUUID();
   db.prepare(`INSERT INTO postings (id,owner_id,url,title,company,destination,found_at,created_at)
-              VALUES (?, ?, 'https://x.example/', 'T', 'C', 'board', 0, 0)`).run(pid, owner);
+              VALUES (?, ?, ?, 'T', 'C', 'board', 0, 0)`).run(pid, owner, `https://x.example/${pid}`);
   db.prepare(`INSERT INTO submissions (id,owner_id,posting_id,status,whose_turn,created_at)
               VALUES (?, ?, ?, ?, ?, 0)`).run(id, owner, pid, status, whoseTurn);
   return id;
@@ -167,11 +167,12 @@ test('recoverInFlight opens a final_submit gate for an in_flight submission.subm
   const row = db.prepare('SELECT * FROM action_log WHERE id = ?').get(actionId);
   assert.equal(row.outcome, 'in_flight', 'recovery never rewrites the in_flight row');
 
-  // Second run: the gate is already open → calm; no second act lands (key spent once).
+  // Second run: the progress marker (the gate.open act under recover-<id>) excludes this
+  // row at selection time → calm; nothing re-examined, no second act lands.
   const actsBefore = Number(db.prepare(`SELECT COUNT(*) c FROM action_log WHERE verb LIKE 'gate.%'`).get().c);
   const r2 = recoverInFlight(db);
+  assert.equal(r2.checked, 0, 'marker excludes the row from the window — no re-examination');
   assert.equal(r2.opened.length, 0);
-  assert.ok(r2.skipped.some((s) => s.actionId === actionId && s.reason === 'gate already open'));
   assert.equal(Number(db.prepare(`SELECT COUNT(*) c FROM action_log WHERE verb LIKE 'gate.%'`).get().c), actsBefore, 'no new act on a calm rerun');
 });
 
@@ -183,6 +184,72 @@ test('recoverInFlight ignores in_flight verbs with no external effect', (t) => {
     .run(actionId, 'u-a', `req-x-${actionId}`, 'posting.tracked', JSON.stringify({ postingId: 'p-x' }));
 
   const r = recoverInFlight(db);
-  assert.equal(r.checked, 1);
+  // Non-external rows never enter the candidate window at all — they cannot starve it.
+  assert.equal(r.checked, 0, 'filtered out of selection; not even examined');
   assert.equal(r.opened.length, 0, 'no external effect → nothing to gate');
+});
+
+test('recoverInFlight traverses a backlog larger than one window across restarts (no starvation)', (t) => {
+  const db = freshDb(t);
+  // 51 distinct submissions, each with one in_flight external send — one past the default
+  // window of 50. Under the old selection this tail row starved forever: every startup
+  // re-examined the same first 50 (already gated) and never reached it.
+  const subIds = [];
+  for (let i = 0; i < 51; i++) {
+    const subId = seedSubmission(db, {});
+    subIds.push(subId);
+    db.prepare(`INSERT INTO action_log (id,actor,request_id,verb,target,intent_at,outcome) VALUES (?,?,?,?,?,?,'in_flight')`)
+      .run(randomUUID(), 'u-a', `req-send-${i}`, 'submission.submit',
+        JSON.stringify({ kind: 'submission', id: subId }), i);
+  }
+
+  const r1 = recoverInFlight(db); // startup #1
+  assert.equal(r1.checked, 50, 'first window covers exactly the limit');
+  assert.equal(r1.opened.length, 50);
+
+  const r2 = recoverInFlight(db); // restart: the starved tail is now reachable
+  assert.equal(r2.checked, 1, 'only the previously-starved row remains a candidate');
+  assert.equal(r2.opened.length, 1);
+
+  const r3 = recoverInFlight(db); // and then calm — nothing re-examined ever again
+  assert.equal(r3.checked, 0);
+  assert.equal(r3.opened.length, 0);
+
+  // Every submission ended with exactly one gate; none got two (no duplicate sends).
+  let openGates = 0;
+  for (const id of subIds) openGates += db.prepare(
+    'SELECT COUNT(*) c FROM gate_actions WHERE submission_id = ? AND closed_at IS NULL').get(id).c;
+  assert.equal(openGates, 51);
+  const totalGateActs = Number(db.prepare(
+    `SELECT COUNT(*) c FROM action_log WHERE verb = 'gate.open' AND request_id LIKE 'recover-%'`).get().c);
+  assert.equal(totalGateActs, 51, 'one gate.open act per recovered send — no duplicates');
+  const untouched = Number(db.prepare(`SELECT COUNT(*) c FROM action_log
+    WHERE outcome = 'in_flight' AND verb = 'submission.submit'`).get().c);
+  assert.equal(untouched, 51, 'original in_flight rows stay untouched forever (invariant 3)');
+});
+
+test('recoverInFlight lands a recovery.checked marker when another path already gates the send', (t) => {
+  const db = freshDb(t);
+  const subId = seedSubmission(db, {});
+  // Two in_flight external rows for ONE submission: A first by intent_at, B behind it.
+  const aId = randomUUID();
+  const bId = randomUUID();
+  db.prepare(`INSERT INTO action_log (id,actor,request_id,verb,target,intent_at,outcome) VALUES (?,?,?,?,?,?,'in_flight')`)
+    .run(aId, 'u-a', `req-sa-${aId}`, 'submission.submit', JSON.stringify({ kind: 'submission', id: subId }), 0);
+  db.prepare(`INSERT INTO action_log (id,actor,request_id,verb,target,intent_at,outcome) VALUES (?,?,?,?,?,?,'in_flight')`)
+    .run(bId, 'u-a', `req-sb-${bId}`, 'submission.submit', JSON.stringify({ kind: 'submission', id: subId }), 1);
+
+  const r1 = recoverInFlight(db);
+  assert.equal(r1.checked, 2);
+  assert.equal(r1.opened.length, 1, 'A opens the gate');
+  assert.ok(r1.skipped.some((s) => s.actionId === bId && s.reason === 'gate already open'));
+
+  // B's marker landed: a recovery.checked act under its stable key — honest log, no re-nag.
+  const m = db.prepare(`SELECT * FROM action_log WHERE request_id = ?`).get('recover-' + bId);
+  assert.equal(m.verb, 'recovery.checked', 'defensive path leaves an explicit progress marker');
+
+  // Next startup: both rows excluded at selection time — calm, nothing re-examined.
+  const r2 = recoverInFlight(db);
+  assert.equal(r2.checked, 0);
+  assert.equal(r2.opened.length, 0);
 });
