@@ -46,6 +46,10 @@ The exact thing sent — never reconstructed from memory. One row per attempt; a
 The queue the website puts front and center: one precise action at a time.
 `id`, `owner_id`, composite FK `(submission_id, owner_id) → submissions(id, owner_id)` (invariant 6; no unique on that pair — closed gates stay in history and a new one opens after them; only invariant 1's partial index bounds the open ones), `kind` = captcha | login | 2fa | final_submit, `ask text` (the single precise thing to do), `opened_at`, `closed_at nullable`, `closed_by user_id nullable`, `verification_ref → blobs nullable`.
 
+### gate_handlers
+Who acts on each gate kind, per owner — policy as data (slice 4). One row per (owner, kind) that opts in; a missing row means "no opt-in" and resolves to `human`, so a gate always lands with someone who can act on it.
+`id`, `owner_id`, `kind` = captcha | login | 2fa | final_submit, `handler text` — the name of a registered code-side handler (the write refuses any unregistered name, which is what keeps "human by default" safe), `updated_at`. UNIQUE on (owner_id, kind); upserted through the API.
+
 ### contacts
 People the owner talks to, optionally tied to a submission.
 `id`, `owner_id`, composite FK `(submission_id, owner_id) → submissions(id, owner_id)` with submission_id nullable (a contact can exist before any submission; invariant 6), `name`, `email`, `title`, `notes text`.

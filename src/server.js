@@ -1,15 +1,18 @@
-// src/server.js — Career Wrangler app skeleton (slice 1).
+// src/server.js — Career Wrangler app skeleton (slice 1) + human-gate queue (slice 4).
 //
-// Zero-dependency node:http server that serves the tracker page and a small
-// read-only JSON API over the migrated SQLite database. The human-gate write
-// handlers (approve / resend / close) are slice 4; this slice only needs the
-// site to boot, serve the page, and prove the schema is live behind it.
+// Zero-dependency node:http server that serves the tracker page and a small JSON API
+// over the migrated SQLite database. Slice 4 adds the gate write path: approve /
+// resend / close land through completeGate under the pinned owner's idempotency key,
+// handler policy is data (gate_handlers) with 'human' by default, and an in_flight
+// external-effect act opens a gate at startup instead of being re-executed.
 //
 //   npm run dev            → http://localhost:3179/  (or $PORT)
-//   GET /                  → public/tracker.html
-//   GET /api/health        → { ok, foreign_keys, tables }
-//   GET /api/tracker       → postings + submissions + open gates
-
+//   GET  /                 → public/tracker.html
+//   GET  /api/health       → { ok, foreign_keys, tables }
+//   GET  /api/tracker      → postings + submissions + open gates (with gate id)
+//   POST /api/gates/:id    → { decision: approve|resend|close, request_id } — one act
+//   GET  /api/handlers     → registered handler names + resolved handler per kind
+//   POST /api/handlers     → { kind, handler } — opt into a registered handler (data)
 import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
@@ -18,6 +21,15 @@ import { fileURLToPath } from 'node:url';
 
 import { openDb, fkPragmaOn } from './db.js';
 import { applyMigrations } from './migrate.js';
+import {
+  completeGate,
+  recoverInFlight,
+  setGateHandler,
+  resolveGateHandler,
+  gateHandlerNames,
+  GATE_KINDS,
+  GateError,
+} from './gates.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // .../src
 const PUBLIC_DIR = path.join(HERE, '..', 'public');
@@ -54,15 +66,16 @@ export function makeTrackerStatements(db, owner) {
     // At most one OPEN gate per submission (invariant 1) — the partial unique index makes this a projection.
     // Field names are the v4 schema's own (kind/ask/opened_at); the page renders them as-is.
     gates: () => db.prepare(`
-      SELECT ga.submission_id, ga.owner_id, ga.kind, ga.ask, ga.opened_at
+      SELECT ga.id, ga.submission_id, ga.owner_id, ga.kind, ga.ask, ga.opened_at
       FROM gate_actions ga
       WHERE ga.closed_at IS NULL AND ga.owner_id = ?`).all(o),
   };
 }
 
-export function start({ dbFile = DB_FILE, autoMigrate = true } = {}) {
+export function start({ dbFile = DB_FILE, autoMigrate = true, recover = true } = {}) {
   const db = openDb(dbFile);
   if (autoMigrate) applyMigrations(db); // idempotent; migration_log guards re-runs
+  if (recover) recoverInFlight(db); // slice 4: an in_flight external-effect act opens a gate, never blind-resends
   const owner = resolvePinnedOwner(db); // throws with a named-owner error on an unpinned multi-owner DB
   const t = makeTrackerStatements(db, owner);
 
@@ -72,6 +85,15 @@ export function start({ dbFile = DB_FILE, autoMigrate = true } = {}) {
       if (url.pathname === '/api/health') return sendJson(res, healthPayload(db));
       if (url.pathname === '/api/tracker')
         return sendJson(res, { postings: t.postings(), submissions: t.submissions(), gates: t.gates() });
+
+      // Slice 4 write path. The actor is always the pinned owner — this boundary takes no
+      // ownership input per request (review 3b39c978); decisions land through completeGate's
+      // idempotency key, and a replayed request_id returns the original outcome calmly.
+      if (url.pathname === '/api/handlers' && req.method === 'GET') return sendJson(res, handlersPayload(db, owner));
+      if (url.pathname === '/api/handlers' && req.method === 'POST') return handleSetHandler(req, res, db, owner);
+      const gateMatch = /^\/api\/gates\/([^/]+)$/.exec(url.pathname);
+      if (gateMatch && req.method === 'POST')
+        return handleGateDecision(req, res, db, owner, decodeURIComponent(gateMatch[1]));
 
       // Static: only under PUBLIC_DIR. / → tracker.html; anything else must exist there.
       const rel = url.pathname === '/' ? 'tracker.html' : url.pathname.replace(/^\/+/, '');
@@ -107,6 +129,64 @@ function healthPayload(db) {
     foreign_keys: fkPragmaOn(db),
     tables: db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`).all().map((r) => r.name),
   };
+}
+
+// --- slice 4 handlers ---------------------------------------------------------------
+
+// Handler policy for the pinned owner: what code can register (the selectable names), plus
+// which handler each gate kind resolves to — 'human' everywhere no row opts in, so a gate
+// always lands with someone who can act on it (data-model §gate_handlers).
+function handlersPayload(db, owner) {
+  return {
+    registered: gateHandlerNames(),
+    handlers: Object.fromEntries(GATE_KINDS.map((kind) => [kind, resolveGateHandler(db, { ownerId: owner.id, kind })])),
+  };
+}
+
+// POST /api/handlers — body { kind, handler }. Data only: the row selects from registered
+// names; an unregistered name is refused at write time (BadGateInputError → 400), which is
+// what keeps 'human by default' safe.
+async function handleSetHandler(req, res, db, owner) {
+  let body;
+  try {
+    body = JSON.parse((await readBody(req)) || '{}');
+  } catch {
+    return sendJson(res, { error: 'body must be JSON' }, 400);
+  }
+  try {
+    setGateHandler(db, { ownerId: owner.id, kind: body.kind, handler: body.handler });
+  } catch (err) {
+    if (err instanceof GateError) return sendJson(res, { error: err.message }, err.status);
+    throw err;
+  }
+  return sendJson(res, handlersPayload(db, owner));
+}
+
+// POST /api/gates/:id — body { decision, request_id }. One act under the pinned owner's
+// idempotency key; a replayed request_id returns the original outcome calmly (200 duplicate),
+// and a fresh key against a closed gate is refused with 409.
+async function handleGateDecision(req, res, db, owner, gateId) {
+  let body;
+  try {
+    body = JSON.parse((await readBody(req)) || '{}');
+  } catch {
+    return sendJson(res, { error: 'body must be JSON' }, 400);
+  }
+  if (!body.decision || !body.request_id) return sendJson(res, { error: 'decision and request_id are required' }, 400);
+  try {
+    const r = completeGate(db, { actor: owner.id, requestId: body.request_id, gateId, decision: body.decision });
+    return sendJson(res, r);
+  } catch (err) {
+    if (err instanceof GateError) return sendJson(res, { error: err.message }, err.status);
+    throw err; // outer catch → 500 with message
+  }
+}
+
+// Collect the request body as text. Small JSON payloads only — this is a local tool.
+async function readBody(req) {
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 function sendJson(res, obj, status = 200) {

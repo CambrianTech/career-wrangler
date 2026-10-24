@@ -31,10 +31,10 @@ test('foreign_keys pragma is live before any DDL', () => {
   assert.equal(fkPragmaOn(db), true, 'foreign_keys must be ON');
 });
 
-test('19 migrations land fresh; re-apply is a no-op', () => {
+test('20 migrations land fresh; re-apply is a no-op', () => {
   const r = applyMigrations(db);
-  assert.equal(r.applied, 19, `expected 19 migrations fresh, got ${r.applied}`);
-  assert.equal(db.prepare('SELECT COUNT(*) c FROM migration_log').get().c, 19);
+  assert.equal(r.applied, 20, `expected 20 migrations fresh, got ${r.applied}`);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM migration_log').get().c, 20);
   const r2 = applyMigrations(db);
   assert.equal(r2.applied, 0, 're-apply must be a no-op');
 });
