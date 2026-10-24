@@ -99,10 +99,15 @@ export async function start({ dbFile = DB_FILE, autoMigrate = true, recover = tr
       // ownership input per request (review 3b39c978); decisions land through completeGate's
       // idempotency key, and a replayed request_id returns the original outcome calmly.
       if (url.pathname === '/api/handlers' && req.method === 'GET') return sendJson(res, handlersPayload(db, owner));
-      if (url.pathname === '/api/handlers' && req.method === 'POST') return handleSetHandler(req, res, db, owner);
+      // Both async routes are wrapped at the boundary: a rejection that escapes a handler
+      // must still get an answer — unhandledRejection leaves the client with only a timeout
+      // (send-back finding 3). Each handler answers its known error classes inline; this is
+      // the last line of defense for anything unexpected.
+      if (url.pathname === '/api/handlers' && req.method === 'POST')
+        return routeBoundary(handleSetHandler(req, res, db, owner), res);
       const gateMatch = /^\/api\/gates\/([^/]+)$/.exec(url.pathname);
       if (gateMatch && req.method === 'POST')
-        return handleGateDecision(req, res, db, owner, decodeURIComponent(gateMatch[1]));
+        return routeBoundary(handleGateDecision(req, res, db, owner, decodeURIComponent(gateMatch[1])), res);
 
       // Static: only under PUBLIC_DIR. / → tracker.html; anything else must exist there.
       const rel = url.pathname === '/' ? 'tracker.html' : url.pathname.replace(/^\/+/, '');
@@ -162,12 +167,15 @@ async function handleSetHandler(req, res, db, owner) {
   } catch {
     return sendJson(res, { error: 'body must be JSON' }, 400);
   }
+  // A parsed-but-not-object body (null, a string, an array) is a client error — refusing it
+  // here keeps the dereference below from ever throwing outside a catch (send-back finding 3).
+  if (typeof body !== 'object' || body === null || Array.isArray(body))
+    return sendJson(res, { error: 'body must be a JSON object' }, 400);
   try {
     setGateHandler(db, { ownerId: owner.id, kind: body.kind, handler: body.handler });
   } catch (err) {
     if (err instanceof GateError) return sendJson(res, { error: err.message }, err.status);
-    // An async handler's rejection cannot reach the outer synchronous catch — answer here:
-    return sendJson(res, { error: err.message || 'internal error' }, 500);
+    return sendJson(res, { error: err.message || 'internal error' }, 500); // answered inline — never escaped
   }
   return sendJson(res, handlersPayload(db, owner));
 }
@@ -182,6 +190,10 @@ async function handleGateDecision(req, res, db, owner, gateId) {
   } catch {
     return sendJson(res, { error: 'body must be JSON' }, 400);
   }
+  // A parsed-but-not-object body (null, a string, an array) would throw on the dereference
+  // below outside any catch — refuse it as a client error first (send-back finding 3).
+  if (typeof body !== 'object' || body === null || Array.isArray(body))
+    return sendJson(res, { error: 'body must be a JSON object' }, 400);
   if (!body.decision || !body.request_id) return sendJson(res, { error: 'decision and request_id are required' }, 400);
   try {
     const r = completeGate(db, { actor: owner.id, requestId: body.request_id, gateId, decision: body.decision });
@@ -203,6 +215,19 @@ async function readBody(req) {
 function sendJson(res, obj, status = 200) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(obj, null, 2));
+}
+
+// Last line of defense for an async route: attach a catch so ANY rejection that escapes a
+// handler still gets answered — a bare unhandledRejection leaves the client only a timeout
+// (send-back finding 3). If the handler already answered inline this is a no-op; if even
+// that answer fails (connection gone), there is nothing left to do but drop quietly.
+function routeBoundary(promise, res) {
+  promise.catch((err) => {
+    try {
+      if (!res.headersSent && !res.writableEnded)
+        sendJson(res, { error: err.message || 'internal error' }, 500);
+    } catch {}
+  });
 }
 
 // `npm run dev` — boot and stay up. Banner prints the ACTUAL bound address (server.address()),

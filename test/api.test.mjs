@@ -232,6 +232,38 @@ test('malformed or empty bodies are client errors on both gate routes; the serve
   assert.equal(h.status, 200);
 });
 
+// A literal `null` body parses cleanly as JSON — pre-fix it escaped handleGateDecision's
+// catches (unhandledRejection; the request timed out with no response) and mis-stated itself
+// as a 500 on /api/handlers. Both routes now refuse any non-object shape with 400 before
+// dereferencing, so the reviewer's exact repro gets an answer instead of a timeout.
+test('non-object JSON bodies (null, strings, arrays) are refused 400 on both gate routes', async (t) => {
+  const base = await boot(t);
+  const raw = (urlPath, text) => fetch(`${base}${urlPath}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: text,
+  });
+
+  // The reviewer's exact repro: literal `null` — valid JSON, no object to read fields from.
+  let r = await raw(`/api/gates/${randomUUID()}`, 'null');
+  assert.equal(r.status, 400, 'null body on the gate route is a client error — answered inline, not timed out');
+  assert.match((await r.json()).error, /object/i);
+
+  r = await raw('/api/handlers', 'null');
+  assert.equal(r.status, 400, 'null body on handlers was mis-stated as a 500 pre-fix; now refused as client error');
+  assert.match((await r.json()).error, /object/i);
+
+  // Every other non-object shape takes the same refusal path.
+  for (const text of ['"a string"', '42', '[1, 2]']) {
+    r = await raw(`/api/gates/${randomUUID()}`, text);
+    assert.equal(r.status, 400);
+    r = await raw('/api/handlers', text);
+    assert.equal(r.status, 400);
+  }
+
+  // And the server is still up and answering.
+  const h = await fetch(`${base}/api/health`);
+  assert.equal(h.status, 200);
+});
+
 test('a DB rejection on a gate route answers 500 inline; the server keeps serving', async (t) => {
   // Own boot here so the test can reach the handle and close its connection: every
   // subsequent DB call throws a non-GateError. Pre-fix that throw escaped the async
