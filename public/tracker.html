@@ -8,18 +8,43 @@
     :root { color-scheme: dark; font-family: system-ui, sans-serif; }
     body { margin: 0 auto; max-width: 52rem; padding: 1.5rem; line-height: 1.45; }
     h1 { font-size: 1.3rem; }
+    h2 { font-size: 1.05rem; }
     .muted { color: #8b93a7; font-size: 0.85rem; }
     table { border-collapse: separate; border-spacing: 0; width: 100%; margin-top: 0.75rem;
       background: #171c26; border: 1px solid #2a2f3d; border-radius: 0.5rem; }
-thead th { background: #1c2230; color: #cfd5e4; font-weight: 600;
-          border-bottom: 1px solid #3a4152; }
-tbody tr + tr td { border-top: 1px solid #232837; }
+    thead th { background: #1c2230; color: #cfd5e4; font-weight: 600;
+           border-bottom: 1px solid #3a4152; }
+    tbody tr + tr td { border-top: 1px solid #232837; }
     th, td { text-align: left; padding: 0.4rem 0.6rem; font-size: 0.9rem; }
-td[colspan="4"] { padding-top: 1.1rem; padding-bottom: 1.1rem; text-align: center;
+    td[colspan="4"] { padding-top: 1.1rem; padding-bottom: 1.1rem; text-align: center;
                   color: #9aa3b8; }
     .pill { display: inline-block; padding: 0.05rem 0.5rem; border-radius: 0.8rem; font-size: 0.75rem; background: #262b3a; }
     .gate { color: #ffd479; }
-    footer { margin-top: 1.5rem; }
+
+    /* slice 4 — gate cards */
+    .gates { list-style: none; padding: 0; margin: 0.75rem 0; display: grid; gap: 0.6rem; }
+    .gate-card { background: #1c2230; border: 1px solid #3a4152; border-left: 0.25rem solid #ffd479;
+      border-radius: 0.5rem; padding: 0.6rem 0.8rem; }
+    .gate-card .kind { font-weight: 600; color: #ffd479; font-size: 0.8rem; letter-spacing: 0.03em; text-transform: uppercase; }
+    .gate-card .ask { margin: 0.25rem 0 0.4rem; font-size: 0.9rem; }
+    .gate-actions { display: flex; gap: 0.4rem; align-items: center; }
+    button.act { background: #262b3a; color: #e8ecf5; border: 1px solid #3a4152; border-radius: 0.4rem;
+      padding: 0.25rem 0.7rem; font-size: 0.85rem; cursor: pointer; }
+    button.act:hover { background: #303749; }
+    button.act:disabled { opacity: 0.5; cursor: wait; }
+    .gate-result { margin-left: auto; font-size: 0.8rem; color: #8b93a7; }
+    .gate-result.ok { color: #7fd6a4; }
+
+    /* slice 4 — handler policy */
+    .handlers { display: grid; gap: 0.35rem; margin-top: 0.75rem; background: #171c26;
+      border: 1px solid #2a2f3d; border-radius: 0.5rem; padding: 0.75rem 0.9rem; }
+    .handlers .row { display: flex; gap: 0.5rem; align-items: center; font-size: 0.88rem; }
+    .handlers .row label { width: 8.5rem; color: #cfd5e4; }
+    .handlers select { background: #262b3a; color: #e8ecf5; border: 1px solid #3a4152;
+      border-radius: 0.35rem; padding: 0.15rem 0.3rem; font-size: 0.85rem; }
+    .handlers .current { color: #8b93a7; font-size: 0.8rem; }
+
+    footer { margin-top: 1.5rem; display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
   </style>
 </head>
 <body>
@@ -29,25 +54,130 @@ td[colspan="4"] { padding-top: 1.1rem; padding-bottom: 1.1rem; text-align: cente
   <section>
     <h2>Submissions</h2>
     <table>
-      <thead><tr><th>posting</th><th>company</th><th>status</th><th>created</th></tr></thead>
+      <thead><tr><th>posting</th><th>company</th><th>status</th><th>created</th></thead>
       <tbody id="submissions"></tbody>
     </table>
   </section>
 
   <section>
     <h2>Open human gates</h2>
-    <p class="muted" id="gate-note">none (approve / resend / close land in slice 4)</p>
-    <ul id="gates"></ul>
+    <p class="muted" id="gate-note">loading…</p>
+    <ul class="gates" id="gates"></ul>
+  </section>
+
+  <section>
+    <h2>Gate handlers</h2>
+    <p class="muted">Who receives each gate kind. A kind with no row resolves to <code>human</code> — the person at this page.</p>
+    <div class="handlers" id="handlers"><span class="muted">loading…</span></div>
   </section>
 
   <footer>
     <span class="pill" id="fk">foreign_keys: …</span>
-    <span class="muted">slice 1 skeleton — read-only over SQLite (node:sqlite)</span>
+    <span class="muted">slice 4 — human-gate queue over SQLite (node:sqlite)</span>
   </footer>
 
   <script>
+    // Slice 4 view. Component model à la Lit, zero dependencies: small custom elements each
+    // own one fetch/render concern; the page composes them and re-polls while active.
     const $ = (id) => document.getElementById(id);
     const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const fmtTime = (ms) => (ms ? new Date(ms).toLocaleString() : '—');
+
+    // One act under the pinned owner's idempotency key: fresh request_id per click, buttons
+    // disabled in flight so a double-click can't spend two keys; the server replays a
+    // redelivered key calmly and refuses a fresh one against a closed gate (409).
+    async function postJson(url, body) {
+      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const data = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+      if (!r.ok) throw Object.assign(new Error(data.error || `HTTP ${r.status}`), { status: r.status, data });
+      return data;
+    }
+
+    class GateCard extends HTMLElement {
+      connectedCallback() { this.render(); }
+      render() {
+        const g = JSON.parse(this.dataset.gate);
+        this.innerHTML = '';
+        const head = document.createElement('div');
+        head.className = 'kind'; head.textContent = g.kind;
+        const ask = document.createElement('p');
+        ask.className = 'ask'; ask.textContent = g.ask || '(no ask text)';
+        const when = document.createElement('span');
+        when.className = 'muted'; when.textContent = `opened ${fmtTime(g.opened_at)}`;
+        const actions = document.createElement('div'); actions.className = 'gate-actions';
+        for (const decision of ['approve', 'resend', 'close']) {
+          const b = document.createElement('button');
+          b.className = 'act'; b.textContent = decision;
+          b.addEventListener('click', () => this.decide(decision, actions));
+          actions.appendChild(b);
+        }
+        const result = document.createElement('span'); result.className = 'gate-result';
+        actions.appendChild(result);
+        this.append(head, ask, when, actions);
+      }
+      async decide(decision, actions) {
+        for (const b of actions.querySelectorAll('button')) b.disabled = true;
+        const result = actions.querySelector('.gate-result');
+        try {
+          const r = await postJson(`/api/gates/${this.dataset.id}`, { decision, request_id: crypto.randomUUID() });
+          if (r.duplicate) { result.textContent = 'replay — original outcome returned'; }
+          else if (decision === 'approve' && r.submission?.status === 'submitted') result.textContent = 'approved ✓ submission sent';
+          else if (decision === 'resend') result.textContent = 'turn back to the persona';
+          else if (decision === 'close') result.textContent = r.submission?.status === 'closed' ? 'gate + submission closed' : 'gate dismissed';
+          else result.textContent = `${decision} recorded`;
+          result.classList.add('ok');
+          setTimeout(() => window.dispatchEvent(new CustomEvent('tracker-refresh')), 900); // let the row leave via re-render
+        } catch (err) {
+          result.textContent = err.message;
+          for (const b of actions.querySelectorAll('button')) b.disabled = false;
+        }
+      }
+    }
+
+    class HandlerPolicy extends HTMLElement {
+      connectedCallback() { this.load(); }
+      async load() {
+        try {
+          const h = await fetch('/api/handlers').then((r) => r.json());
+          this.innerHTML = '';
+          for (const kind of Object.keys(h.handlers)) {
+            const row = document.createElement('div'); row.className = 'row';
+            const label = document.createElement('label'); label.textContent = kind;
+            const sel = document.createElement('select');
+            for (const name of h.registered) {
+              const opt = document.createElement('option');
+              opt.value = name; opt.textContent = name;
+              if (name === h.handlers[kind]) opt.selected = true;
+              sel.appendChild(opt);
+            }
+            sel.addEventListener('change', async () => {
+              sel.disabled = true;
+              try { await postJson('/api/handlers', { kind, handler: sel.value }); this.load(); }
+              catch (err) { alert(`set-handler refused: ${err.message}`); sel.disabled = false; this.load(); }
+            });
+            const cur = document.createElement('span'); cur.className = 'current'; cur.textContent = `→ ${h.handlers[kind]}`;
+            row.append(label, sel, cur);
+            this.appendChild(row);
+          }
+        } catch { this.innerHTML = '<span class="muted">handlers unavailable</span>'; }
+      }
+    }
+
+    customElements.define('gate-card', GateCard);
+    customElements.define('handler-policy', HandlerPolicy);
+
+    function renderGates(gates) {
+      const ul = $('gates');
+      ul.innerHTML = '';
+      if (!gates.length) { $('gate-note').textContent = 'none open — the pipeline is not waiting on a person'; return; }
+      $('gate-note').textContent = `${gates.length} gate${gates.length > 1 ? 's' : ''} need your eyes`;
+      for (const g of gates) {
+        const el = document.createElement('gate-card');
+        el.dataset.id = g.id;
+        el.dataset.gate = JSON.stringify(g);
+        ul.appendChild(el); // connectedCallback renders it
+      }
+    }
 
     async function load() {
       try {
@@ -63,23 +193,19 @@ td[colspan="4"] { padding-top: 1.1rem; padding-bottom: 1.1rem; text-align: cente
             <td>${esc(s.posting_title)}</td>
             <td>${esc(s.posting_company)}</td>
             <td><span class="pill">${esc(s.status)}${s.approved_by ? ' ✓' : ''}</span></td>
-            <td class="muted">${s.created_at ? new Date(s.created_at).toLocaleString() : '—'}</td>
+            <td class="muted">${fmtTime(s.created_at)}</td>
           </tr>`).join('') || '<tr><td colspan="4" class="muted">no submissions yet</td></tr>';
 
-        if (tracker.gates.length) {
-          $('gate-note').textContent = '';
-          $('gates').innerHTML = tracker.gates.map((g) => `
-            <li class="gate">${esc(g.kind)}: ${esc(g.ask)} — opened ${new Date(g.opened_at).toLocaleString()}</li>`).join('');
-        } else {
-          $('gates').innerHTML = '';
-        }
+        renderGates(tracker.gates);
       } catch (err) {
         $('status').textContent = `failed to load: ${err.message}`;
       }
     }
 
+    window.addEventListener('tracker-refresh', () => load());
     load();
     setInterval(load, 10_000); // refresh while the pipeline is active
+    document.getElementById('handlers')?.replaceWith(Object.assign(document.createElement('handler-policy'), { id: 'handlers' }));
   </script>
 </body>
 </html>
